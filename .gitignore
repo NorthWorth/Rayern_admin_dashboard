@@ -1,0 +1,19 @@
+node_modules
+dist
+dist-ssr
+coverage
+*.local
+.DS_Store
+*.log
+
+# Environment / secrets (never commit)
+.env
+.env.*
+!.env.example
+
+# Build/tooling state
+*.tsbuildinfo
+
+# Server runtime artifacts
+server/node_modules
+server/dist
