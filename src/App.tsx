@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { NavLink, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { OverviewPage } from './pages/Overview'
 import { UsersPage } from './pages/Users'
@@ -8,8 +9,10 @@ import { SystemPage } from './pages/System'
 import { ErrorsPage } from './pages/Errors'
 import { ObservabilityPage } from './pages/Observability'
 import { AuditPage } from './pages/Audit'
+import { LoginPage } from './pages/Login'
+import { Button } from './components/ui/Button'
 import { ToastProvider } from './components/ui/Toast'
-import { DEMO_MODE } from './lib/api'
+import { AUTH_EVENT, DEMO_MODE, session } from './lib/api'
 import { clsx } from './lib/utils'
 
 interface NavItem {
@@ -147,7 +150,8 @@ function Sidebar() {
   )
 }
 
-function Topbar() {
+function Topbar({ onSignOut }: { onSignOut: () => void }) {
+  const operator = session.operator()
   return (
     <header className="flex h-14 shrink-0 items-center justify-between border-b border-ink-200 bg-white px-6">
       <PageTitle />
@@ -157,6 +161,17 @@ function Topbar() {
           <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
           Console online
         </span>
+        {operator ? (
+          <div className="flex items-center gap-2">
+            <div className="hidden text-right leading-tight sm:block">
+              <p className="text-xs font-medium text-ink-900">{operator.name}</p>
+              <p className="text-[10px] text-ink-500">{operator.email}</p>
+            </div>
+            <Button variant="ghost" onClick={onSignOut} className="text-xs">
+              Sign out
+            </Button>
+          </div>
+        ) : null}
       </div>
     </header>
   )
@@ -183,30 +198,59 @@ function NotFound() {
   )
 }
 
+function AuthedApp() {
+  const [authed, setAuthed] = useState(() => session.token() !== null)
+
+  useEffect(() => {
+    const onAuthExpired = () => setAuthed(false)
+    window.addEventListener(AUTH_EVENT, onAuthExpired)
+    return () => window.removeEventListener(AUTH_EVENT, onAuthExpired)
+  }, [])
+
+  if (!authed) {
+    return <LoginPage onSuccess={() => setAuthed(true)} />
+  }
+
+  return (
+    <Shell
+      onSignOut={() => {
+        session.clear()
+        setAuthed(false)
+      }}
+    />
+  )
+}
+
+function Shell({ onSignOut }: { onSignOut: () => void }) {
+  return (
+    <div className="flex h-screen overflow-hidden">
+      <Sidebar />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <Topbar onSignOut={onSignOut} />
+        <main className="flex-1 overflow-y-auto scrollbar-thin">
+          <Routes>
+            <Route path="/" element={<OverviewPage />} />
+            <Route path="/users" element={<UsersPage />} />
+            <Route path="/workspaces" element={<WorkspacesPage />} />
+            <Route path="/metrics" element={<MetricsPage />} />
+            <Route path="/emails" element={<EmailsPage />} />
+            <Route path="/system" element={<SystemPage />} />
+            <Route path="/errors" element={<ErrorsPage />} />
+            <Route path="/observability" element={<ObservabilityPage />} />
+            <Route path="/audit" element={<AuditPage />} />
+            <Route path="/404" element={<NotFound />} />
+            <Route path="*" element={<Navigate to="/404" replace />} />
+          </Routes>
+        </main>
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   return (
     <ToastProvider>
-      <div className="flex h-screen overflow-hidden">
-        <Sidebar />
-        <div className="flex min-w-0 flex-1 flex-col">
-          <Topbar />
-          <main className="flex-1 overflow-y-auto scrollbar-thin">
-            <Routes>
-              <Route path="/" element={<OverviewPage />} />
-              <Route path="/users" element={<UsersPage />} />
-              <Route path="/workspaces" element={<WorkspacesPage />} />
-              <Route path="/metrics" element={<MetricsPage />} />
-              <Route path="/emails" element={<EmailsPage />} />
-              <Route path="/system" element={<SystemPage />} />
-              <Route path="/errors" element={<ErrorsPage />} />
-              <Route path="/observability" element={<ObservabilityPage />} />
-              <Route path="/audit" element={<AuditPage />} />
-              <Route path="/404" element={<NotFound />} />
-              <Route path="*" element={<Navigate to="/404" replace />} />
-            </Routes>
-          </main>
-        </div>
-      </div>
+      <AuthedApp />
     </ToastProvider>
   )
 }

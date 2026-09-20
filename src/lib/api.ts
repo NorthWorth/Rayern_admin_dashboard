@@ -1,4 +1,5 @@
 import type { ID, Paged } from './types'
+import type { AdminOperator } from './types'
 
 /**
  * API configuration for the dedicated dashboard backend.
@@ -35,6 +36,42 @@ export class HttpError extends Error {
   }
 }
 
+/* ------------------------------ Admin session ------------------------------ */
+
+const TOKEN_KEY = 'rayern_admin_token'
+const OPERATOR_KEY = 'rayern_admin_operator'
+
+export interface LoginResponse {
+  token: string
+  operator: AdminOperator
+}
+
+export const session = {
+  token(): string | null {
+    return localStorage.getItem(TOKEN_KEY)
+  },
+  operator(): AdminOperator | null {
+    const raw = localStorage.getItem(OPERATOR_KEY)
+    if (!raw) return null
+    try {
+      return JSON.parse(raw) as AdminOperator
+    } catch {
+      return null
+    }
+  },
+  set(login: LoginResponse): void {
+    localStorage.setItem(TOKEN_KEY, login.token)
+    localStorage.setItem(OPERATOR_KEY, JSON.stringify(login.operator))
+  },
+  clear(): void {
+    localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem(OPERATOR_KEY)
+  },
+}
+
+/** Fired when the backend rejects the admin token (401) so the app can re-auth. */
+export const AUTH_EVENT = 'rayern:auth-expired'
+
 export interface RequestOptions {
   method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'
   body?: unknown
@@ -50,11 +87,13 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     throw new HttpError('Dashboard API is not configured (VITE_ADMIN_API_URL is not set).', undefined)
   }
 
+  const token = session.token()
   const res = await fetch(`${API_BASE_URL.replace(/\/$/, '')}${path}`, {
     method: options.method ?? 'GET',
     headers: {
       Accept: 'application/json',
       ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
     signal: options.signal,
@@ -69,11 +108,38 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     } catch {
       // keep default message
     }
+    if (res.status === 401) {
+      // Token expired or revoked — notify the shell so it shows the login view.
+      window.dispatchEvent(new Event(AUTH_EVENT))
+    }
     throw new HttpError(message, res.status)
   }
 
   if (res.status === 204) return undefined as T
   return (await res.json()) as T
+}
+
+/** POST /auth/login against the dashboard backend. */
+export async function login(email: string, password: string): Promise<LoginResponse> {
+  if (!API_BASE_URL) {
+    throw new HttpError('Dashboard API is not configured (VITE_ADMIN_API_URL is not set).', undefined)
+  }
+  const res = await fetch(`${API_BASE_URL.replace(/\/$/, '')}/auth/login`, {
+    method: 'POST',
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  })
+  if (!res.ok) {
+    let message = `Login failed (${res.status})`
+    try {
+      const payload = (await res.json()) as { error?: string }
+      message = payload.error ?? message
+    } catch {
+      // keep default
+    }
+    throw new HttpError(message, res.status)
+  }
+  return (await res.json()) as LoginResponse
 }
 
 /** Builds a querystring from defined params, skipping empty values. */
