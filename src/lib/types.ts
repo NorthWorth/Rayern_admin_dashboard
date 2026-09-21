@@ -165,6 +165,27 @@ export interface SystemOverview {
   requestCount24h: number
   latency: LatencyPercentiles
   recentFailures: RecentFailure[]
+
+  /**
+   * Health of the dashboard-side Rayern pull-sync worker. The dashboard
+   * OUTBOUND polls Rayern; Rayern never calls the dashboard.
+   */
+  sync: RayernSyncStatus
+}
+
+/**
+ * Health of the dashboard-side Rayern pull-sync worker (spec section 12).
+ */
+export interface RayernSyncStatus {
+  enabled: boolean
+  status: HealthStatus
+  lastSuccessAt: string | null
+  lastAttemptAt: string | null
+  lastFailureAt: string | null
+  lastError: string | null
+  consecutiveFailures: number
+  stale: boolean
+  running: boolean
 }
 
 export interface RecentFailure {

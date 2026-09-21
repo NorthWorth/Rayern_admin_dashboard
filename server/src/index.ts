@@ -24,7 +24,7 @@ import systemRoutes from './routes/system'
 import errorsRoutes from './routes/errors'
 import observabilityRoutes from './routes/observability'
 import auditRoutes from './routes/audit'
-import syncRoutes from './routes/sync'
+import { startSyncWorker } from './rayernSync'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -96,8 +96,9 @@ app.use('/errors', requireAdmin, errorsRoutes)
 app.use('/observability', requireAdmin, observabilityRoutes)
 app.use('/audit', requireAdmin, auditRoutes)
 
-// Server-to-server ingestion from Rayern (x-sync-key protected).
-app.use('/sync', syncRoutes)
+// NOTE: Rayern never calls this API. Aggregate Rayern data arrives via the
+// dashboard-side pull-sync worker (rayernSync.ts), which outbound-GETs the
+// configured Rayern endpoint on a schedule.
 
 /* ------------------------------ Static SPA -------------------------------- */
 
@@ -105,7 +106,7 @@ const distDir = path.resolve(__dirname, '../..', 'dist')
 if (config.serveStatic) {
   app.use(express.static(distDir))
   app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/auth') || req.path.startsWith('/sync') || req.path === '/healthz') {
+    if (req.path.startsWith('/auth') || req.path === '/healthz') {
       next()
       return
     }
@@ -169,6 +170,10 @@ async function start(): Promise<void> {
   app.listen(config.port, () => {
     console.log(`[dashboard-api] listening on port ${config.port} (db: ${isDbReady() ? 'ready' : 'degraded'})`)
   })
+
+  // Dashboard-side background worker that pulls approved aggregates from the
+  // Rayern API. Rayern never pushes, never waits, and never depends on us.
+  if (isDbReady()) startSyncWorker()
 }
 
 void start()

@@ -6,7 +6,7 @@ import { VolumeBarChart } from '../components/charts'
 import { systemService } from '../services/system'
 import { useQuery } from '../hooks/useQuery'
 import { formatCompact, formatNumber, formatPct, timeAgo, titleCase } from '../lib/utils'
-import type { HealthStatus } from '../lib/types'
+import type { HealthStatus, RayernSyncStatus } from '../lib/types'
 
 function tone(s: HealthStatus): 'green' | 'amber' | 'red' {
   return s === 'healthy' ? 'green' : s === 'degraded' ? 'amber' : 'red'
@@ -27,6 +27,8 @@ export function SystemPage() {
         <KpiCard label="Error rate" value={q.data ? formatPct(q.data.errorRatePct, 2) : '—'} tone={q.data && q.data.errorRatePct > 1 ? 'red' : 'default'} />
         <KpiCard label="Latency p95" value={q.data ? `${q.data.latency.p95}ms` : '—'} sub={q.data ? `p50 ${q.data.latency.p50}ms · p99 ${q.data.latency.p99}ms` : undefined} />
       </div>
+
+      <SyncStatusCard sync={q.data?.sync} loading={q.loading} error={q.error} onRetry={q.refetch} />
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <Card className="xl:col-span-2">
@@ -138,5 +140,59 @@ export function SystemPage() {
         ) : null}
       </Card>
     </div>
+  )
+}
+
+function SyncStatusCard({
+  sync,
+  loading,
+  error,
+  onRetry,
+}: {
+  sync: RayernSyncStatus | undefined
+  loading: boolean
+  error: string | null
+  onRetry: () => void
+}) {
+  return (
+    <Card>
+      <CardHeader
+        title="Rayern synchronization"
+        subtitle="The dashboard periodically pulls approved aggregates from the Rayern API — Rayern never calls the dashboard"
+      />
+      <CardBody>
+        {loading ? (
+          <LoadingBlock rows={2} />
+        ) : error ? (
+          <ErrorState message={error} onRetry={onRetry} />
+        ) : !sync ? (
+          <p className="text-sm text-ink-500">Sync status unavailable.</p>
+        ) : !sync.enabled ? (
+          <p className="text-sm text-ink-500">
+            Synchronization is not configured yet. Set <code className="rounded bg-ink-100 px-1 text-xs">RAYERN_SYNC_ENDPOINT</code> and
+            <code className="ml-1 rounded bg-ink-100 px-1 text-xs">RAYERN_MONITORING_TOKEN</code> on the dashboard backend to enable
+            periodic pulls of approved aggregate data.
+        </p>
+        ) : (
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+            <StatusBadge tone={sync.status === 'healthy' ? 'green' : sync.status === 'degraded' ? 'amber' : 'red'}>
+              {titleCase(sync.status)}
+            </StatusBadge>
+            <span className="text-ink-600">
+              Last successful pull:{' '}
+              <span className="font-medium text-ink-800">{sync.lastSuccessAt ? timeAgo(sync.lastSuccessAt) : 'never'}</span>
+            </span>
+            <span className="text-ink-600">
+              Last attempt: <span className="font-medium text-ink-800">{sync.lastAttemptAt ? timeAgo(sync.lastAttemptAt) : 'never'}</span>
+            </span>
+            {sync.consecutiveFailures > 0 ? (
+              <span className="font-medium text-red-600">{sync.consecutiveFailures} consecutive failures</span>
+            ) : null}
+            {sync.stale ? <span className="font-medium text-amber-600">Data may be stale</span> : null}
+            {sync.lastError ? <span className="w-full truncate text-xs text-red-600" title={sync.lastError}>Last error: {sync.lastError}</span> : null}
+          </div>
+        )}
+      </CardBody>
+    </Card>
   )
 }

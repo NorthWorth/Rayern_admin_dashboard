@@ -4,12 +4,18 @@
  * Flow: dashboard frontend → dashboard API → Resend → recipients.
  * The Resend API key never leaves the server. Verification/password-reset
  * emails are NOT handled here (they belong to Rayern's own flow).
+ *
+ * Recipients (spec 18): To/CC/BCC are independent lists. Every address is
+ * validated + normalized; duplicates within a field and across fields are
+ * removed (address wins in the earliest field: To > CC > BCC) so nobody
+ * receives the email twice. The frontend must never be trusted for this —
+ * dedup happens again here, server-side.
  */
 import { Router } from 'express'
 import { z } from 'zod'
 import { query } from '../db'
 import { recordAudit, adminActor } from '../audit'
-import { sendEmail } from '../emailer'
+import { sendEmail, senderIdentity } from '../emailer'
 import { toEmailMessage, type EmailRow, type EmailStatus, type EmailType } from '../format'
 import type { Request, Response, NextFunction } from 'express'
 
@@ -17,13 +23,24 @@ const router = Router()
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
-/** Validates and normalizes a recipient list (1..50 unique addresses). */
+/** Validates and normalizes a recipient list (0..500 unique addresses). */
 function recipientsSchema({ min = 0 }: { min?: number } = {}) {
   return z
     .array(z.string().trim().max(254))
     .min(min)
-    .max(50)
-    .transform((arr) => Array.from(new Set(arr)))
+    .max(500)
+    .transform((arr) => {
+      // Case-insensitive dedup, keeping the first-seen casing of each address.
+      const seen = new Set<string>()
+      const out: string[] = []
+      for (const addr of arr) {
+        const key = addr.toLowerCase()
+        if (seen.has(key)) continue
+        seen.add(key)
+        out.push(addr)
+      }
+      return out
+    })
     .refine((arr) => arr.every((a) => EMAIL_RE.test(a)), { message: 'Invalid email address in list' })
 }
 
@@ -34,7 +51,31 @@ const SendBody = z.object({
   bcc: recipientsSchema().default([]),
   subject: z.string().trim().min(1).max(300),
   message: z.string().min(1).max(100_000),
+  type: z.enum(['update', 'announcement', 'promotion', 'notice']).optional(),
 })
+
+/**
+ * Cross-field recipient hygiene, applied after per-field validation:
+ * an address already used in an earlier field is dropped from later fields.
+ */
+function dedupeAcrossFields(to: string[], cc: string[], bcc: string[]): { to: string[]; cc: string[]; bcc: string[] } {
+  const seen = new Set<string>(to.map((a) => a.toLowerCase()))
+  const cc2: string[] = []
+  for (const addr of cc) {
+    const key = addr.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    cc2.push(addr)
+  }
+  const bcc2: string[] = []
+  for (const addr of bcc) {
+    const key = addr.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    bcc2.push(addr)
+  }
+  return { to, cc: cc2, bcc: bcc2 }
+}
 
 /** Escapes HTML in plain-text messages so the HTML part mirrors the text. */
 function escapeHtml(text: string): string {
@@ -59,6 +100,8 @@ ${paragraphs}
 Sent via the Rayern admin dashboard.</p>
 </div></body></html>`
 }
+
+/* ------------------------------- History list ------------------------------ */
 
 router.get('/', async (_req, res, next) => {
   try {
@@ -120,6 +163,63 @@ router.get('/stats', async (_req, res, next) => {
   }
 })
 
+/**
+ * GET /emails/audience — admin-selectable recipients for bulk "select all".
+ * Returns account emails ONLY (never workspace content). Supports the same
+ * filters as the Users page so the admin can target verified users, etc.
+ */
+router.get('/audience', async (req, res, next) => {
+  try {
+    const q = z
+      .object({
+        verification: z.enum(['verified', 'unverified', 'all']).default('all'),
+        status: z.enum(['active', 'all']).default('active'),
+        limit: z.coerce.number().int().min(1).max(500).default(500),
+      })
+      .parse(req.query)
+
+    const conditions: string[] = []
+    const params: unknown[] = []
+    if (q.verification !== 'all') {
+      params.push(q.verification)
+      conditions.push(`verification = $${params.length}`)
+    }
+    if (q.status !== 'all') {
+      params.push(q.status)
+      conditions.push(`status = $${params.length}`)
+    }
+    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+
+    const rows = await query<{ email: string; name: string }>(
+      `SELECT email, name FROM accounts ${where} ORDER BY created_at DESC LIMIT ${q.limit}`,
+      params,
+    )
+    res.json({ count: rows.length, recipients: rows.map((r) => r.email) })
+  } catch (err) {
+    next(err)
+  }
+})
+
+/** GET /emails/:id/body — content for "copy as new email" (never auto-sends). */
+router.get('/:id/body', async (req, res, next) => {
+  try {
+    const rows = await query<{ subject: string; body: string; to_addrs: string[]; cc_addrs: string[]; bcc_addrs: string[] }>(
+      `SELECT subject, body, to_addrs, cc_addrs, bcc_addrs FROM emails WHERE id = $1 LIMIT 1`,
+      [req.params.id],
+    )
+    const row = rows[0]
+    if (!row) {
+      res.status(404).json({ error: 'Email not found' })
+      return
+    }
+    res.json({ subject: row.subject, message: row.body, to: row.to_addrs, cc: row.cc_addrs, bcc: row.bcc_addrs })
+  } catch (err) {
+    next(err)
+  }
+})
+
+/* ---------------------------------- Send ----------------------------------- */
+
 router.post('/send', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const parsed = SendBody.safeParse(req.body)
@@ -130,53 +230,60 @@ router.post('/send', async (req: Request, res: Response, next: NextFunction) => 
     }
     const body = parsed.data
 
-    if (!body.from || body.from.trim() === '') {
-      res.status(400).json({ error: 'from: sender identity is required' })
+    // The From identity is enforced server-side; the frontend value is ignored.
+    const from = senderIdentity()
+
+    const { to, cc, bcc } = dedupeAcrossFields(body.to, body.cc, body.bcc)
+    if (to.length === 0) {
+      res.status(400).json({ error: 'to: at least one recipient is required' })
       return
     }
 
     const result = await sendEmail({
-      to: body.to,
-      cc: body.cc,
-      bcc: body.bcc,
+      to,
+      cc,
+      bcc,
       subject: body.subject,
       html: textToHtml(body.message),
       text: body.message,
     })
 
     const rows = await query<{ id: string; sent_at: Date }>(
-      `INSERT INTO emails (resend_id, from_addr, to_addrs, cc_addrs, bcc_addrs, subject, type, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO emails (resend_id, from_addr, to_addrs, cc_addrs, bcc_addrs, subject, body, type, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING id, sent_at`,
       [
         result.resendId,
-        'Rayern <support@rayern.com.ng>',
-        body.to,
-        body.cc,
-        body.bcc,
+        from,
+        to,
+        cc,
+        bcc,
         body.subject,
-        'update' satisfies EmailType,
+        body.message,
+        body.type ?? ('update' satisfies EmailType),
         'sent' satisfies EmailStatus,
       ],
     )
     const inserted = rows[0]
 
     await recordAudit(adminActor(req.admin!), 'admin', 'email.sent', body.subject, {
-      to: body.to.join(', '),
-      cc: body.cc.join(', '),
-      bcc: body.bcc.join(', '),
+      to: to.join(', '),
+      cc: cc.join(', '),
+      bcc: bcc.join(', '),
+      type: body.type ?? 'update',
+      dryRun: String(result.dryRun),
       resendId: result.resendId ?? '',
     })
 
     res.status(201).json({
       id: inserted.id,
       resendId: result.resendId ?? '',
-      from: 'Rayern <support@rayern.com.ng>',
-      to: body.to,
-      cc: body.cc,
-      bcc: body.bcc,
+      from,
+      to,
+      cc,
+      bcc,
       subject: body.subject,
-      type: 'update',
+      type: body.type ?? 'update',
       status: 'sent',
       sentAt: inserted.sent_at.toISOString(),
     })

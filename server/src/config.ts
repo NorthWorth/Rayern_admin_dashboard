@@ -21,13 +21,23 @@ function optionalWithDevFallback(name: string, label: string): string {
   return generated
 }
 
+/** Raw env value with surrounding whitespace trimmed; '' when unset. */
+function trimmed(name: string): string {
+  return process.env[name]?.trim() ?? ''
+}
+
+// Rayern pull-sync: the dashboard OUTBOUND-polls the Rayern API. Rayern never
+// calls the dashboard and never depends on it. The exact endpoint URL is
+// configured (not invented) — when unset, synchronization stays disabled.
+const rayernApiBaseUrl = trimmed('RAYERN_API_BASE_URL')
+const rayernSyncEndpoint = trimmed('RAYERN_SYNC_ENDPOINT')
+
 export const config = {
   // API_PORT keeps the dashboard API on its own port even where the platform
   // injects PORT for the frontend dev server (they run side by side in dev).
   port: Number(process.env.API_PORT ?? process.env.PORT ?? 4000),
   databaseUrl: required('DATABASE_URL', true),
   jwtSecret: optionalWithDevFallback('ADMIN_JWT_SECRET', 'ephemeral JWT secret'),
-  syncApiKey: optionalWithDevFallback('SYNC_API_KEY', 'ephemeral sync key'),
   // In production, restrict to exact origins. In dev, allow all — the API
   // uses bearer tokens (not cookies) so CORS is defense-in-depth only.
   corsOrigins:
@@ -49,4 +59,20 @@ export const config = {
   serveStatic: (process.env.SERVE_STATIC ?? 'false') === 'true',
   /** Dev/test only: validate + record emails without calling Resend. */
   emailDryRun: (process.env.EMAIL_DRY_RUN ?? '') === '1',
+
+  /* ------------------------- Rayern pull-sync config ------------------------ */
+  rayern: {
+    /** Optional base URL, e.g. https://api.rayern.com — RAYERN_SYNC_ENDPOINT wins if set. */
+    apiBaseUrl: rayernApiBaseUrl,
+    /** Full URL of the Rayern metrics endpoint the dashboard GETs. Empty = sync disabled. */
+    syncEndpoint: rayernSyncEndpoint || (rayernApiBaseUrl ? `${rayernApiBaseUrl.replace(/\/$/, '')}/internal/dashboard-metrics` : ''),
+    /** Bearer token sent to Rayern. Lives only on this server; never in the browser. */
+    monitoringToken: trimmed('RAYERN_MONITORING_TOKEN'),
+    /** How often the dashboard pulls from Rayern (ms). */
+    intervalMs: Math.max(Number(process.env.RAYERN_SYNC_INTERVAL_MS ?? 300_000), 30_000),
+    /** Per-request timeout (ms) — a hanging Rayern must never hang the worker. */
+    timeoutMs: Math.min(Math.max(Number(process.env.RAYERN_SYNC_TIMEOUT_MS ?? 15_000), 2_000), 120_000),
+  },
 }
+
+export const rayernSyncEnabled = (): boolean => config.rayern.syncEndpoint.length > 0

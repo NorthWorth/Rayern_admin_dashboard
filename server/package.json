@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit",
     "check": "tsc --noEmit",
     "build": "tsc",
-    "smoke": "tsx src/smoke.ts"
+    "smoke": "bun run src/smoke.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.8",

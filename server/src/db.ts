@@ -11,7 +11,9 @@
  *  - accounts:    privacy-safe account registry (identifier, name, email,
  *                 verification, status, created) — no workspace linkage
  *  - workspaces:  registration metadata only (name, member_count, plan, created)
- *  - emails:      admin-sent email history with recipient metadata (no bodies)
+ *  - emails:      admin-sent email history with recipient metadata and body
+ *                 (body stored to power "copy as new email"; never exposed in lists)
+ *  - sync_status: dashboard-side pull-sync health (last success/attempt/error)
  *  - errors:      operational error records (service/endpoint/status/message/trace)
  *  - audit_events: admin/system actions performed through the dashboard
  *  - service_health / request_log / service_telemetry / trace_spans /
@@ -24,7 +26,7 @@
  * what its own database does not contain.
  */
 import { Pool } from 'pg'
-import { config } from './config'
+import { config, rayernSyncEnabled } from './config'
 
 export const USING_EMBEDDED_DB = !config.databaseUrl
 
@@ -117,11 +119,36 @@ export async function initDb(): Promise<void> {
       cc_addrs    TEXT[] NOT NULL DEFAULT '{}',
       bcc_addrs   TEXT[] NOT NULL DEFAULT '{}',
       subject     TEXT NOT NULL,
+      body        TEXT NOT NULL DEFAULT '',
       type        TEXT NOT NULL DEFAULT 'update'
                   CHECK (type IN ('update','announcement','promotion','notice')),
       status      TEXT NOT NULL DEFAULT 'sent'
                   CHECK (status IN ('queued','sent','delivered','failed','bounced')),
       sent_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `)
+
+  // Migration for pre-existing installs created before the body column existed.
+  await query(`ALTER TABLE emails ADD COLUMN IF NOT EXISTS body TEXT NOT NULL DEFAULT ''`)
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS rayern_sync_state (
+      key         TEXT PRIMARY KEY,
+      payload     JSONB NOT NULL,
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `)
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS sync_status (
+      id                 INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+      last_attempt_at    TIMESTAMPTZ,
+      last_success_at    TIMESTAMPTZ,
+      last_failure_at    TIMESTAMPTZ,
+      last_error         TEXT,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      enabled            BOOLEAN NOT NULL DEFAULT false,
+      updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `)
 
@@ -229,9 +256,15 @@ export async function initDb(): Promise<void> {
   await query(`CREATE INDEX IF NOT EXISTS idx_accounts_created ON accounts (created_at)`)
   await query(`CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts (status)`)
   await query(`CREATE INDEX IF NOT EXISTS idx_emails_sent_at ON emails (sent_at)`)
+  await query(`CREATE INDEX IF NOT EXISTS idx_request_log_time ON request_log (time)`)
   await query(`CREATE INDEX IF NOT EXISTS idx_errors_last_seen ON errors (last_seen_at)`)
   await query(`CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_events (timestamp)`)
-  await query(`CREATE INDEX IF NOT EXISTS idx_request_log_time ON request_log (time)`)
+  await query(`CREATE INDEX IF NOT EXISTS idx_sync_status_updated ON sync_status (updated_at)`)
+
+  await query(`
+    INSERT INTO sync_status (id, enabled) VALUES (1, $1)
+    ON CONFLICT (id) DO UPDATE SET enabled = EXCLUDED.enabled
+  `, [rayernSyncEnabled()])
   await query(`CREATE INDEX IF NOT EXISTS idx_trace_spans_start ON trace_spans (start_time)`)
   await query(`CREATE INDEX IF NOT EXISTS idx_span_metrics_time ON span_metrics (time)`)
 }

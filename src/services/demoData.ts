@@ -285,6 +285,17 @@ export function buildSystemOverview(): SystemOverview {
     requestCount24h: requestVolume.reduce((s, p) => s + p.count, 0),
     latency: { p50: 86, p90: 148, p95: 224, p99: 410 },
     recentFailures,
+    sync: {
+      enabled: true,
+      status: 'healthy' as const,
+      lastSuccessAt: minutesAgo(4),
+      lastAttemptAt: minutesAgo(4),
+      lastFailureAt: daysAgo(2),
+      lastError: null,
+      consecutiveFailures: 0,
+      stale: false,
+      running: false,
+    },
   }
 }
 

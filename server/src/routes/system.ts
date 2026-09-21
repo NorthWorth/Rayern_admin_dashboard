@@ -2,11 +2,13 @@
  * System routes — technical/operational health only.
  *
  * Services marked "self" report this dashboard backend's own live status.
- * Rayern-side rows are seeded by the Rayern server-to-server sync endpoint;
- * if Rayern has never synced, its entries show as unknown/degraded-neutral.
+ * Rayern-side rows in service_health arrive via the dashboard pull-sync worker
+ * (rayernSync.ts); if Rayern has never been polled successfully, its entries
+ * are simply absent and the sync-status card shows the state instead.
  */
 import { Router } from 'express'
 import { pool } from '../db'
+import { getSyncStatus } from '../rayernSync'
 
 const router = Router()
 
@@ -104,6 +106,9 @@ router.get('/overview', async (_req, res, next) => {
     const total24h = Number(totalRows.rows[0]?.total ?? 0)
     const errors24h = Number(totalRows.rows[0]?.errors ?? 0)
 
+    // Dashboard-side Rayern pull-sync health (spec section 12).
+    const sync = await getSyncStatus()
+
     res.json({
       overall,
       services,
@@ -127,6 +132,23 @@ router.get('/overview', async (_req, res, next) => {
         message: r.message,
         count: Number(r.count),
       })),
+      sync: {
+        enabled: sync.enabled,
+        status: sync.enabled
+          ? sync.consecutiveFailures >= 3 || (sync.stale && sync.lastSuccessAt !== null)
+            ? 'failing'
+            : sync.consecutiveFailures >= 1 || sync.lastSuccessAt === null
+              ? 'degraded' // recent failure, or configured but never succeeded
+              : 'healthy'
+          : 'degraded', // not configured
+        lastSuccessAt: sync.lastSuccessAt,
+        lastAttemptAt: sync.lastAttemptAt,
+        lastFailureAt: sync.lastFailureAt,
+        lastError: sync.lastError,
+        consecutiveFailures: sync.consecutiveFailures,
+        stale: sync.stale,
+        running: sync.running,
+      },
       meta: {
         processUptimeSec: uptimeSec,
         dbLatencyMs,

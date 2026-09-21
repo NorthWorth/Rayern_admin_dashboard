@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Card, CardBody, CardHeader } from '../components/ui/Card'
 import { KpiCard } from '../components/KpiCard'
 import { Button } from '../components/ui/Button'
@@ -37,8 +37,14 @@ export function EmailsPage() {
   const listQ = useQuery(() => emailsService.list())
   const statsQ = useQuery(() => emailsService.stats())
   const [composerOpen, setComposerOpen] = useState(false)
+  const [copySource, setCopySource] = useState<string | null>(null)
 
   const emails = listQ.data ?? []
+
+  const openComposer = (copyId: string | null = null): void => {
+    setCopySource(copyId)
+    setComposerOpen(true)
+  }
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6">
@@ -99,7 +105,7 @@ export function EmailsPage() {
           title="Recent email activity"
           subtitle="Metadata only — content is not displayed here"
           actions={
-            <Button variant="primary" onClick={() => setComposerOpen(true)}>
+            <Button variant="primary" onClick={() => openComposer()}>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
               Send Email
             </Button>
@@ -123,11 +129,12 @@ export function EmailsPage() {
                   <th scope="col" className="px-3 py-2.5">Status</th>
                   <th scope="col" className="px-3 py-2.5">Sent</th>
                   <th scope="col" className="px-3 py-2.5">Message ID</th>
+                  <th scope="col" className="px-3 py-2.5"><span className="sr-only">Actions</span></th>
                 </tr>
               </thead>
               <tbody>
                 {emails.map((e) => (
-                  <tr key={e.id} className="border-b border-ink-100 last:border-0 hover:bg-ink-50/70">
+                  <tr key={e.id} className="border-b border-ink-100 last:border-0 hover:bg-ink-50/70 group">
                     <td className="px-4 py-2.5">
                       <p className="truncate font-medium text-ink-800" title={e.to.join(', ')}>{e.to.join(', ')}</p>
                     </td>
@@ -139,6 +146,15 @@ export function EmailsPage() {
                     <td className="px-3 py-2.5"><StatusBadge tone={emailStatusTone(e.status)}>{titleCase(e.status)}</StatusBadge></td>
                     <td className="whitespace-nowrap px-3 py-2.5 text-ink-600">{formatDateTime(e.sentAt)}</td>
                     <td className="px-3 py-2.5"><code className="rounded bg-ink-100 px-1.5 py-0.5 text-[11px] text-ink-600">{e.resendId}</code></td>
+                    <td className="px-3 py-2.5 text-right">
+                      <button
+                        type="button"
+                        onClick={() => openComposer(e.id)}
+                        className="text-xs font-medium text-ink-500 underline-offset-2 hover:text-ink-800 hover:underline"
+                      >
+                        Copy as new
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -147,14 +163,14 @@ export function EmailsPage() {
         )}
       </Card>
 
-      <EmailComposer open={composerOpen} onClose={() => setComposerOpen(false)} onSent={() => listQ.refetch()} />
+      <EmailComposer open={composerOpen} copyId={copySource} onClose={() => setComposerOpen(false)} onSent={() => listQ.refetch()} />
     </div>
   )
 }
 
 /* ------------------------------- Composer -------------------------------- */
 
-export function EmailComposer({ open, onClose, onSent }: { open: boolean; onClose: () => void; onSent: () => void }) {
+export function EmailComposer({ open, copyId, onClose, onSent }: { open: boolean; copyId: string | null; onClose: () => void; onSent: () => void }) {
   const { showToast } = useToast()
   const [from, setFrom] = useState(DEFAULT_FROM)
   const [to, setTo] = useState<string[]>([])
@@ -162,15 +178,54 @@ export function EmailComposer({ open, onClose, onSent }: { open: boolean; onClos
   const [bcc, setBcc] = useState<string[]>([])
   const [subject, setSubject] = useState('')
   const [message, setMessage] = useState('')
+  const [type, setType] = useState<EmailType>('update')
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
+
+  const [audienceCount, setAudienceCount] = useState<number | null>(null)
+  const [loadingAudience, setLoadingAudience] = useState(false)
 
   const toInvalid = to.length === 0
   const subjectInvalid = subject.trim().length === 0
   const messageInvalid = message.trim().length === 0
 
+  /* -------------------- Copy as new email (spec section 19) ------------------ */
+  /* Prefills a NEW composition from a past email. It must never auto-send. */
+  useEffect(() => {
+    if (!open || !copyId) return
+    let cancelled = false
+    emailsService
+      .copyBody(copyId)
+      .then((body) => {
+        if (cancelled) return
+        setTo(body.to ?? [])
+        setCc(body.cc ?? [])
+        setBcc(body.bcc ?? [])
+        setSubject(body.subject ? `[Copy] ${body.subject}` : '')
+        setMessage(body.message ?? '')
+      })
+      .catch(() => showToast('error', 'Could not load the original email for copying.'))
+    return () => {
+      cancelled = true
+    }
+  }, [open, copyId, showToast])
+
+  /* --------------- Bulk recipient selection (spec section 18) --------------- */
+  const loadAudience = async (): Promise<void> => {
+    setLoadingAudience(true)
+    try {
+      const { count, recipients } = await emailsService.audience('all')
+      setAudienceCount(count)
+      setTo(recipients)
+    } catch {
+      showToast('error', 'Could not load the recipient audience.')
+    } finally {
+      setLoadingAudience(false)
+    }
+  }
+
   const reset = (): void => {
-    setTo([]); setCc([]); setBcc([]); setSubject(''); setMessage(''); setSendError(null)
+    setTo([]); setCc([]); setBcc([]); setSubject(''); setMessage(''); setSendError(null); setAudienceCount(null)
   }
 
   const handleSend = async (): Promise<void> => {
@@ -178,7 +233,7 @@ export function EmailComposer({ open, onClose, onSent }: { open: boolean; onClos
     setSending(true)
     try {
       // Request goes to the dashboard backend, which performs the Resend send.
-      await emailsService.send({ from, to, cc, bcc, subject: subject.trim(), message })
+      await emailsService.send({ from, to, cc, bcc, subject: subject.trim(), message, type })
       showToast('success', 'Email sent successfully.')
       reset()
       onSent()
@@ -200,8 +255,38 @@ export function EmailComposer({ open, onClose, onSent }: { open: boolean; onClos
         <Field label="From" hint="Fixed sender identity">
           <Input value={from} onChange={(e) => setFrom(e.target.value)} disabled readOnly />
         </Field>
-        <Field label="To" hint="Press Enter after each address" error={toInvalid && sendError !== null ? 'At least one recipient is required' : null}>
-          <TokenInput value={to} onChange={setTo} placeholder="recipient@example.com" ariaLabel="To recipients" />
+        <Field
+          label="To"
+          hint="Press Enter after each address"
+          error={toInvalid && sendError !== null ? 'At least one recipient is required' : null}
+        >
+          <div className="space-y-1.5">
+            <TokenInput value={to} onChange={setTo} placeholder="recipient@example.com" ariaLabel="To recipients" />
+            <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => void loadAudience()}
+                disabled={loadingAudience}
+                className="text-xs font-medium text-ink-500 underline-offset-2 hover:text-ink-800 hover:underline disabled:opacity-50"
+              >
+                {loadingAudience ? 'Loading audience…' : 'Select all recipients'}
+              </button>
+              {audienceCount !== null ? (
+                <span className="text-[11px] text-ink-400">{audienceCount} account emails filled</span>
+              ) : null}
+            </div>
+          </div>
+        </Field>
+        <Field label="Type" hint="Category shown in history and audit log">
+          <select
+            value={type}
+            onChange={(e) => setType(e.target.value as EmailType)}
+            className="w-full rounded-md border border-ink-200 bg-white px-3 py-2 text-sm text-ink-900 focus:border-ink-400 focus:outline-none focus:ring-2 focus:ring-ink-200"
+          >
+            {(Object.keys(TYPE_LABELS) as EmailType[]).map((t) => (
+              <option key={t} value={t}>{TYPE_LABELS[t]}</option>
+            ))}
+          </select>
         </Field>
         <Field label="CC" hint="Optional">
           <TokenInput value={cc} onChange={setCc} placeholder="cc@example.com" ariaLabel="CC recipients" />
