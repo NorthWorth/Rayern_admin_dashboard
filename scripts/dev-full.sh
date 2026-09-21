@@ -5,4 +5,4 @@ cd "$(dirname "$0")/.."
 bun server/node_modules/.bin/tsx server/src/index.ts &
 API_PID=$!
 trap 'kill $API_PID 2>/dev/null' EXIT INT TERM
-exec bun x vite
+exec bun --cwd client x vite

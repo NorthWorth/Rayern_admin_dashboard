@@ -4,28 +4,12 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "dev:full": "concurrently -k -n web,api \"vite\" \"cd server && bun run dev\"",
-    "build": "tsc -b --noEmit && vite build",
-    "preview": "vite preview",
-    "typecheck": "tsc -b --noEmit",
-    "check": "tsc -b --noEmit"
-  },
-  "dependencies": {
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-router-dom": "^6.28.0",
-    "recharts": "^2.13.3"
-  },
-  "devDependencies": {
-    "@types/react": "^18.3.12",
-    "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.4",
-    "autoprefixer": "^10.4.20",
-    "concurrently": "^10.0.5",
-    "postcss": "^8.4.49",
-    "tailwindcss": "^3.4.15",
-    "typescript": "^5.6.3",
-    "vite": "^5.4.11"
+    "dev": "sh ./scripts/dev-full.sh",
+    "dev:client": "cd client && bun run dev",
+    "dev:server": "cd server && bun run dev",
+    "build": "cd client && bun run build",
+    "typecheck": "cd client && bun tsc -b --noEmit && cd ../server && bun tsc --noEmit",
+    "check": "npm run typecheck",
+    "smoke": "cd server && bun run smoke"
   }
 }

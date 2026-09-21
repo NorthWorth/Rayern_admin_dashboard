@@ -17,3 +17,8 @@ coverage
 # Server runtime artifacts
 server/node_modules
 server/dist
+
+# Client runtime artifacts
+client/node_modules
+client/dist
+client/dist-ssr
