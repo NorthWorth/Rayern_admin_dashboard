@@ -11,6 +11,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import bcrypt from 'bcryptjs'
 import { config } from './config'
+import { SERVER_VERSION } from './version'
 import { initDb, pool, isDbReady, setDbReady, startEmbeddedDbIfConfigured } from './db'
 import { requireAdmin, rateLimit } from './auth'
 import { recordAudit } from './audit'
@@ -89,7 +90,7 @@ app.get('/healthz', async (_req, res) => {
   } catch {
     db = false
   }
-  res.json({ ok: true, db, uptimeSec: Math.floor(process.uptime()) })
+  res.json({ ok: true, db, version: SERVER_VERSION, uptimeSec: Math.floor(process.uptime()) })
 })
 
 app.use('/auth', authRoutes)
