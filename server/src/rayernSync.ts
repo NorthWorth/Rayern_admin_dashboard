@@ -77,6 +77,55 @@ export const SyncPayload = z.object({
 
 export type SyncPayloadData = z.infer<typeof SyncPayload>
 
+/**
+ * Rayern's API wraps responses in an envelope:
+ *   { success: true,  data: { accounts…, workspaces…, services… } }   (HTTP 200)
+ *   { success: false, error: { code, message } }                      (HTTP 40x/5xx)
+ *
+ * The aggregates must be unwrapped from `data` before validation. This is
+ * purely structural: no envelope field other than `data` is read, and the
+ * unwrapped value still goes through the full SyncPayload contract below.
+ *
+ * Returns the aggregate container when an envelope is detected, otherwise the
+ * input unchanged (so a future direct bare-payload response keeps working).
+ * Returns null only when the envelope declares an explicit failure.
+ */
+export function unwrapRayernEnvelope(raw: unknown): { ok: true; value: unknown } | { ok: false; error: string } {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return { ok: true, value: raw }
+  const obj = raw as Record<string, unknown>
+  // Envelope signature: a boolean `success` flag paired with a `data` container.
+  if (typeof obj.success === 'boolean') {
+    if (!obj.success) {
+      const err =
+        typeof obj.error === 'object' && obj.error !== null && 'message' in (obj.error as Record<string, unknown>)
+          ? String((obj.error as { message?: unknown }).message)
+          : 'Rayern reported failure without an error message'
+      return { ok: false, error: `Rayern metrics request reported success=false: ${err.slice(0, 200)}` }
+    }
+    return { ok: true, value: obj.data ?? {} }
+  }
+  return { ok: true, value: raw }
+}
+
+/**
+ * Structural diagnostic of the sync payload — key names and boolean/shape
+ * flags only. Never logs values, tokens, or any customer/personal data.
+ */
+export function describeSyncShape(raw: unknown): string {
+  if (typeof raw !== 'object' || raw === null) return `root:${typeof raw}`
+  const obj = raw as Record<string, unknown>
+  const flags: string[] = []
+  if (typeof obj.success === 'boolean') flags.push(`success=${obj.success}`)
+  const container = unwrapRayernEnvelope(raw)
+  const inner = container.ok && typeof container.value === 'object' && container.value !== null ? (container.value as Record<string, unknown>) : {}
+  if ('data' in obj) flags.push('hasData=true')
+  if (inner.accounts !== undefined) flags.push('accounts=true')
+  if (inner.workspaces !== undefined) flags.push('workspaces=true')
+  if (Array.isArray(inner.services)) flags.push(`services=${inner.services.length}`)
+  if (Object.keys(inner).length === 0) flags.push('container=empty')
+  return flags.join(' ') || 'unrecognized'
+}
+
 /* ------------------------------ Sync state I/O ----------------------------- */
 
 interface SyncStatusRow {
@@ -257,18 +306,32 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
     }
 
     const raw: unknown = await res.json()
-    const parsed = SyncPayload.safeParse(raw)
+
+    // Structural diagnostics before validation: shape flags only, never values.
+    console.log(`[dashboard-sync] Rayern metrics shape: ${describeSyncShape(raw)}`)
+
+    // Rayern wraps payloads in { success, data } — unwrap before validating.
+    // A declared failure (success=false) aborts the cycle without storing.
+    const unwrapped = unwrapRayernEnvelope(raw)
+    if (!unwrapped.ok) {
+      throw new Error(unwrapped.error)
+    }
+
+    const parsed = SyncPayload.safeParse(unwrapped.value)
     if (!parsed.success) {
       // Invalid/unrecognized payload: reject entirely rather than storing a
       // partial trust boundary violation. Only the schema path of the first
       // issue is logged — never payload values.
       const firstPath = parsed.error.issues[0]?.path?.join('.') ?? 'unknown'
+      console.log(
+        `[dashboard-sync] validation failed: issues=${parsed.error.issues.length} firstPath=${firstPath} shape=${describeSyncShape(raw)}`,
+      )
       throw new Error(
         `Rayern sync payload failed validation (${parsed.error.issues.length} issue(s), first at ${firstPath}); nothing was stored`,
       )
     }
 
-    // Safe diagnostics: aggregate values only — never the monitoring token,
+    // Safe diagnostics: aggregate counts only — never the monitoring token,
     // never any customer/personal data.
     console.log(`[dashboard-sync] Rayern metrics received: totalAccounts=${parsed.data.accounts ? parsed.data.accounts.totalAccounts : 'n/a'}`)
 

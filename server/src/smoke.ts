@@ -388,15 +388,47 @@ async function main(): Promise<void> {
     check('hanging Rayern aborted with timeout error', (sync5.lastError ?? '').includes('timed out'))
     rayern.setDelayMs(0)
 
+    console.log('\n— pull-sync: envelope-wrapped success payload (Rayern { success, data } convention) —')
+    // The production Rayern API wraps responses in an envelope:
+    // { success: true, data: { accounts…, workspaces… } }.
+    rayern.setPayload({ success: true, data: GOOD_AGGREGATES })
+    await awaitTick(8, token)
+    const metrics7 = await req('GET', '/platform-metrics/overview', undefined, token)
+    const m7 = metrics7.json as Record<string, unknown>
+    check('envelope data unwrapped and stored', m7.dataSource === 'rayern-sync' && m7.registeredAccounts === 1234)
+    check('envelope workspaces aggregate served', m7.totalWorkspaces === 87)
+    const syncEnv = await syncStatus(token)
+    check('envelope cycle marked success', syncEnv.status === 'healthy' && syncEnv.consecutiveFailures === 0)
+
+    console.log('\n— pull-sync: envelope failure (success=false) —')
+    rayern.setPayload({ success: false, error: { code: 'INTERNAL', message: 'simulated Rayern failure' } })
+    // The worker's interval is clamped in config to a 30s minimum, so a fixed
+    // tick window can read state from the previous (successful) cycle. Poll
+    // for the actual postcondition instead: lastError mentions success=false.
+    const failDeadline = Date.now() + 45_000
+    let syncFail = await syncStatus(token)
+    while (Date.now() < failDeadline && !(syncFail.lastError ?? '').includes('success=false')) {
+      await sleep(500)
+      syncFail = await syncStatus(token)
+    }
+    check('success=false recorded as sync failure', syncFail.lastError?.includes('success=false') === true, `lastError=${syncFail.lastError ?? 'null'}`)
+    check('previously synced data retained after envelope failure', ((await req('GET', '/platform-metrics/overview', undefined, token)).json as { registeredAccounts?: number }).registeredAccounts === 1234)
+
     console.log('\n— pull-sync: recovery —')
     rayern.setPayload(GOOD_AGGREGATES)
-    await awaitTick(8, token)
-    const sync6 = await syncStatus(token)
-    check('recovers automatically on next cycle', sync6.status === 'healthy' && sync6.consecutiveFailures === 0)
+    // Postcondition poll: wait until the next cycle actually recovers
+    // (interval is clamped to 30s in config, so tick-counting is unreliable).
+    const recoverDeadline = Date.now() + 45_000
+    let sync6 = await syncStatus(token)
+    while (Date.now() < recoverDeadline && !(sync6.status === 'healthy' && sync6.consecutiveFailures === 0)) {
+      await sleep(500)
+      sync6 = await syncStatus(token)
+    }
+    check('recovers automatically on next cycle', sync6.status === 'healthy' && sync6.consecutiveFailures === 0, `status=${sync6.status} consecutiveFailures=${sync6.consecutiveFailures}`)
 
     console.log('\n— overlap guard: request count matches schedule —')
-    // Elapsed ticks since boot ≈ 8 → at most 9-10 requests if no overlap doubling.
-    check('no overlapping duplicate pulls', rayern.requestCount() <= 10, `count=${rayern.requestCount()}`)
+    // Elapsed ticks since boot ≈ 10 → at most 12 requests if no overlap doubling.
+    check('no overlapping duplicate pulls', rayern.requestCount() <= 12, `count=${rayern.requestCount()}`)
 
     console.log('\n— emails (validation, enforced From, dedup, dry-run, copy) —')
     const emailStats = await req('GET', '/emails/stats', undefined, token)
