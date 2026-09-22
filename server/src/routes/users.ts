@@ -11,8 +11,23 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { query } from '../db'
 import { toUser, type AccountRow } from '../format'
+import { readSyncedAggregates } from '../rayernSync'
 
 const router = Router()
+
+/** Sum of daily registration counts over the trailing N days (inclusive). */
+function registrationsInLastDays(trend: Array<{ date: string; count: number }>, days: number): number {
+  if (trend.length === 0) return 0
+  const cutoff = new Date()
+  cutoff.setHours(0, 0, 0, 0)
+  cutoff.setDate(cutoff.getDate() - (days - 1))
+  let sum = 0
+  for (const t of trend) {
+    const d = new Date(`${t.date}T00:00:00Z`)
+    if (!Number.isNaN(d.getTime()) && d.getTime() >= cutoff.getTime()) sum += t.count
+  }
+  return sum
+}
 
 const ListQuery = z.object({
   search: z.string().max(200).optional(),
@@ -76,6 +91,22 @@ router.get('/', async (req, res, next) => {
 
 router.get('/stats', async (_req, res, next) => {
   try {
+    // Preferred source: aggregates synchronized from Rayern. The local accounts
+    // table only holds the admin operator (privacy design), so without this
+    // precedence the endpoint would always report zeros in production.
+    const synced = await readSyncedAggregates()
+    if (synced.accounts) {
+      const a = synced.accounts
+      res.json({
+        totalUsers: a.totalAccounts,
+        newUsers7d: registrationsInLastDays(a.registrationsTrend, 7),
+        verified: a.verifiedAccounts,
+        unverified: a.unverifiedAccounts,
+        deleted30d: a.deletedAccounts30d,
+      })
+      return
+    }
+
     const rows = await query<{
       total: string
       new7d: string

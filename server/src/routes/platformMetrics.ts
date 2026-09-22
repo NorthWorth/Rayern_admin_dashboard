@@ -42,6 +42,20 @@ interface SyncedStateRow {
   updated_at: Date
 }
 
+/** Plan order for display. Unknown plans (e.g. 'starter') are appended after. */
+const KNOWN_PLANS = ['free', 'pro', 'team'] as const
+
+function orderPlans(entries: Array<{ plan: string; count: number }>): Array<{ plan: string; count: number }> {
+  const byPlan = new Map(entries.map((p) => [p.plan, p.count]))
+  const ordered: Array<{ plan: string; count: number }> = []
+  for (const plan of KNOWN_PLANS) {
+    if (byPlan.has(plan)) ordered.push({ plan, count: byPlan.get(plan) ?? 0 })
+    byPlan.delete(plan)
+  }
+  for (const [plan, count] of byPlan) ordered.push({ plan, count })
+  return ordered
+}
+
 /** Reads the latest synchronized aggregates, if the pull-sync has stored any. */
 async function readSyncedAggregates(): Promise<{
   accounts: AccountsAggregate | null
@@ -87,11 +101,20 @@ router.get('/overview', async (_req, res, next) => {
     if (synced.accounts) {
       const a = synced.accounts
       const w = synced.workspaces
-      const planOrder = ['free', 'pro', 'team'] as const
-      const localPlanRows = w
-        ? []
-        : await query<{ plan: string; count: string }>(`SELECT plan, COUNT(*)::text AS count FROM workspaces GROUP BY plan`)
-      const planMap = new Map((w?.planBreakdown ?? localPlanRows.map((r) => ({ plan: r.plan, count: Number(r.count) }))).map((p) => [p.plan, p.count]))
+
+      // Plan breakdown comes from the synced workspaces aggregate when present;
+      // otherwise fall back to the synced accounts aggregate; otherwise the
+      // local registry (dev only). Unknown plan names pass through untouched.
+      let planEntries: Array<{ plan: string; count: number }> = []
+      if (w) {
+        planEntries = w.planBreakdown
+      } else if (a.planBreakdown.length > 0) {
+        planEntries = a.planBreakdown
+      } else {
+        planEntries = (await query<{ plan: string; count: string }>(
+          `SELECT plan, COUNT(*)::text AS count FROM workspaces GROUP BY plan`,
+        )).map((r) => ({ plan: r.plan, count: Number(r.count) }))
+      }
 
       res.json({
         registeredAccounts: a.totalAccounts,
@@ -101,8 +124,9 @@ router.get('/overview', async (_req, res, next) => {
         deletedAccounts30d: a.deletedAccounts30d,
         deletionRequestsPending: a.deletionRequestsPending,
         totalWorkspaces: w?.totalWorkspaces ?? 0,
+        newWorkspaces30d: w?.newWorkspaces30d ?? 0,
         registrationsTrend: a.registrationsTrend,
-        planBreakdown: planOrder.map((plan) => ({ plan, count: planMap.get(plan) ?? 0 })),
+        planBreakdown: orderPlans(planEntries),
         dataSource: 'rayern-sync' as const,
         syncedAt: synced.syncedAt,
       })
@@ -154,9 +178,6 @@ router.get('/overview', async (_req, res, next) => {
       `SELECT plan, COUNT(*)::text AS count FROM workspaces GROUP BY plan`,
     )
 
-    const planOrder = ['free', 'pro', 'team'] as const
-    const planMap = new Map(planRows.map((r) => [r.plan, Number(r.count)]))
-
     res.json({
       registeredAccounts: a.total,
       newAccounts30d: a.new30d,
@@ -165,8 +186,9 @@ router.get('/overview', async (_req, res, next) => {
       deletedAccounts30d: a.deleted30d,
       deletionRequestsPending: Number(pendingRows[0]?.count ?? 0),
       totalWorkspaces: Number(workspaceRows[0]?.total ?? 0),
+      newWorkspaces30d: 0,
       registrationsTrend: trendRows.map((r) => ({ date: r.day, count: Number(r.count) })),
-      planBreakdown: planOrder.map((plan) => ({ plan, count: planMap.get(plan) ?? 0 })),
+      planBreakdown: orderPlans(planRows.map((r) => ({ plan: r.plan, count: Number(r.count) }))),
       dataSource: 'local-registry' as const,
       syncedAt: null,
     })

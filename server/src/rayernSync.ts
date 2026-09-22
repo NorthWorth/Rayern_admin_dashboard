@@ -41,9 +41,11 @@ const AccountsAggregate = z.object({
     .array(z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), count: z.number().int().min(0) }))
     .max(400)
     .default([]),
+  // Plan names are Rayern-owned aggregate labels (e.g. 'starter'). Accept any
+  // short identifier so an unknown/new plan tier cannot break the whole sync.
   planBreakdown: z
-    .array(z.object({ plan: z.enum(['free', 'pro', 'team']), count: z.number().int().min(0) }))
-    .max(3)
+    .array(z.object({ plan: z.string().min(1).max(50), count: z.number().int().min(0) }))
+    .max(20)
     .default([]),
 })
 
@@ -52,8 +54,8 @@ const WorkspacesAggregate = z.object({
   newWorkspaces30d: z.number().int().min(0).default(0),
   avgMembersPerWorkspace: z.number().min(0).default(0),
   planBreakdown: z
-    .array(z.object({ plan: z.enum(['free', 'pro', 'team']), count: z.number().int().min(0) }))
-    .max(3)
+    .array(z.object({ plan: z.string().min(1).max(50), count: z.number().int().min(0) }))
+    .max(20)
     .default([]),
 })
 
@@ -162,6 +164,28 @@ async function storePayload(data: SyncPayloadData): Promise<string[]> {
   return sections
 }
 
+export interface SyncedAggregates {
+  accounts: SyncPayloadData['accounts']
+  workspaces: SyncPayloadData['workspaces']
+  syncedAt: string | null
+}
+
+/** Reads the latest synchronized aggregates, if the pull-sync has stored any. */
+export async function readSyncedAggregates(): Promise<SyncedAggregates> {
+  const rows = await query<{ key: string; payload: unknown; updated_at: Date }>(
+    `SELECT key, payload, updated_at FROM rayern_sync_state WHERE key IN ('accounts', 'workspaces')`,
+  )
+  let accounts: SyncedAggregates['accounts']
+  let workspaces: SyncedAggregates['workspaces']
+  let latest: Date | null = null
+  for (const row of rows) {
+    if (latest === null || row.updated_at > latest) latest = row.updated_at
+    if (row.key === 'accounts') accounts = row.payload as SyncedAggregates['accounts']
+    if (row.key === 'workspaces') workspaces = row.payload as SyncedAggregates['workspaces']
+  }
+  return { accounts, workspaces, syncedAt: latest ? latest.toISOString() : null }
+}
+
 /**
  * Records a synchronization failure as an operational error row so it shows up
  * in the Errors/System views. Deduplicated per message (count increments).
@@ -236,13 +260,22 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
     const parsed = SyncPayload.safeParse(raw)
     if (!parsed.success) {
       // Invalid/unrecognized payload: reject entirely rather than storing a
-      // partial trust boundary violation.
+      // partial trust boundary violation. Only the schema path of the first
+      // issue is logged — never payload values.
+      const firstPath = parsed.error.issues[0]?.path?.join('.') ?? 'unknown'
       throw new Error(
-        `Rayern sync payload failed validation (${parsed.error.issues.length} issue(s)); nothing was stored`,
+        `Rayern sync payload failed validation (${parsed.error.issues.length} issue(s), first at ${firstPath}); nothing was stored`,
       )
     }
 
+    // Safe diagnostics: aggregate values only — never the monitoring token,
+    // never any customer/personal data.
+    console.log(`[dashboard-sync] Rayern metrics received: totalAccounts=${parsed.data.accounts ? parsed.data.accounts.totalAccounts : 'n/a'}`)
+
     const sections = await storePayload(parsed.data)
+    console.log(
+      `[dashboard-sync] Rayern metrics persisted: totalAccounts=${parsed.data.accounts ? parsed.data.accounts.totalAccounts : 'n/a'} sections=${sections.join(',') || 'none'}`,
+    )
     await markSuccess(sections)
     return { ok: true, sections }
   } catch (err) {

@@ -169,6 +169,7 @@ export function buildPlatformMetrics(users: User[], workspaces: Workspace[]): Pl
     deletedAccounts30d: userStats.deleted30d,
     deletionRequestsPending: randInt(0, 3),
     totalWorkspaces: wsStats.total,
+    newWorkspaces30d: wsStats.newWorkspaces30d,
     registrationsTrend,
     planBreakdown: [
       { plan: 'free', count: wsStats.total - wsStats.proWorkspaces - wsStats.teamWorkspaces },

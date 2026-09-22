@@ -92,8 +92,13 @@ export interface PlatformMetricsOverview {
   deletedAccounts30d: number
   deletionRequestsPending: number
   totalWorkspaces: number
+  newWorkspaces30d: number
   registrationsTrend: Array<{ date: string; count: number }>
-  planBreakdown: Array<{ plan: Workspace['plan']; count: number }>
+  /**
+   * Plan names come from the synchronized Rayern aggregates and may include
+   * platform-specific tiers (e.g. 'starter'), so they are plain labels here.
+   */
+  planBreakdown: Array<{ plan: string; count: number }>
 }
 
 /* --------------------------------- Emails --------------------------------- */

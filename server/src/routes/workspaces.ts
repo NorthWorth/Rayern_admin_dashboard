@@ -9,6 +9,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { query } from '../db'
 import { toWorkspace, type WorkspaceRow } from '../format'
+import { readSyncedAggregates } from '../rayernSync'
 
 const router = Router()
 
@@ -68,6 +69,23 @@ router.get('/', async (req, res, next) => {
 
 router.get('/stats', async (_req, res, next) => {
   try {
+    // Preferred source: aggregates synchronized from Rayern. The local
+    // workspaces table stays empty in production (privacy design), so without
+    // this precedence the endpoint would always report zeros.
+    const synced = await readSyncedAggregates()
+    if (synced.workspaces) {
+      const w = synced.workspaces
+      const planMap = new Map(w.planBreakdown.map((p) => [p.plan, p.count]))
+      res.json({
+        total: w.totalWorkspaces,
+        newWorkspaces30d: w.newWorkspaces30d,
+        avgMembersPerWorkspace: w.avgMembersPerWorkspace,
+        proWorkspaces: planMap.get('pro') ?? 0,
+        teamWorkspaces: planMap.get('team') ?? 0,
+      })
+      return
+    }
+
     const rows = await query<{
       total: string
       new30d: string
