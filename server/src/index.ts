@@ -55,7 +55,9 @@ app.use(
     origin(origin, callback) {
       // Same-origin / curl / health checks
       if (!origin) return callback(null, true)
-      // Explicit allow-list takes precedence
+      // Explicit allow-list wins when configured (production). Never '*': the
+      // browser calls this API with credentials: 'include', so a wildcard
+      // origin is invalid and would be rejected by browsers anyway.
       if (config.corsOrigins.length > 0 && config.corsOrigins.includes(origin)) {
         return callback(null, true)
       }
@@ -64,7 +66,13 @@ app.use(
       if (config.corsOrigins.length === 0) return callback(null, true)
       return callback(new Error('Not allowed by CORS'))
     },
-    credentials: false,
+    // The dashboard frontend sends credentials: 'include', so credentialed
+    // CORS must be enabled and paired with the explicit origin allow-list.
+    credentials: true,
+    // Only what the dashboard API actually uses (see client/src/lib/api.ts).
+    methods: ['GET', 'POST', 'PATCH', 'DELETE'],
+    allowedHeaders: ['Accept', 'Authorization', 'Content-Type'],
+    maxAge: 86_400,
   }),
 )
 

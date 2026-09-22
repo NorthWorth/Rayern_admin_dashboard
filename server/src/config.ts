@@ -40,11 +40,19 @@ export const config = {
   /** Managed-Postgres CA certificate (PEM, e.g. Aiven) for SSL verification; '' when unset. */
   databaseCaCert: trimmed('DATABASE_CA_CERT'),
   jwtSecret: optionalWithDevFallback('ADMIN_JWT_SECRET', 'ephemeral JWT secret'),
-  // In production, restrict to exact origins. In dev, allow all — the API
-  // uses bearer tokens (not cookies) so CORS is defense-in-depth only.
+  // In production, restrict to an explicit origin allow-list (never '*': the
+  // API is called with credentials: 'include'). The production dashboard
+  // frontend origin is allowed by default; CORS_ORIGINS can extend the list.
+  // In dev/preview, allow all — the API uses bearer tokens (not cookies) so
+  // CORS is defense-in-depth only.
   corsOrigins:
     process.env.NODE_ENV === 'production'
-      ? (process.env.CORS_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean)
+      ? [
+          ...new Set([
+            'https://admin.rayern.com.ng',
+            ...(process.env.CORS_ORIGINS ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+          ]),
+        ]
       : [], // empty = allow all origins
   bootstrap: {
     email: process.env.ADMIN_EMAIL?.trim() || '',
