@@ -78,8 +78,10 @@ export const config = {
     syncEndpoint: rayernSyncEndpoint || (rayernApiBaseUrl ? `${rayernApiBaseUrl.replace(/\/$/, '')}/internal/dashboard-metrics` : ''),
     /** Bearer token sent to Rayern. Lives only on this server; never in the browser. */
     monitoringToken: trimmed('RAYERN_MONITORING_TOKEN'),
-    /** How often the dashboard pulls from Rayern (ms). */
-    intervalMs: Math.max(Number(process.env.RAYERN_SYNC_INTERVAL_MS ?? 300_000), 30_000),
+    /** How often the dashboard pulls from Rayern (ms). Default 10 minutes;
+     * overridable via RAYERN_SYNC_INTERVAL_MS, clamped to a 30s floor so a
+     * misconfiguration can never turn the worker into an aggressive retry loop. */
+    intervalMs: Math.max(Number(process.env.RAYERN_SYNC_INTERVAL_MS ?? 600_000), 30_000),
     /** Per-request timeout (ms) — a hanging Rayern must never hang the worker. */
     timeoutMs: Math.min(Math.max(Number(process.env.RAYERN_SYNC_TIMEOUT_MS ?? 15_000), 2_000), 120_000),
   },

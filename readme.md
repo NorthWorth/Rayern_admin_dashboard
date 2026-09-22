@@ -160,7 +160,7 @@ bun run dev:server   # API server only
 | `RAYERN_SYNC_ENDPOINT` | Full URL of the Rayern metrics endpoint the dashboard pulls from | No (sync disabled if empty) |
 | `RAYERN_API_BASE_URL` | Base URL of the Rayern API (used to construct sync endpoint if `RAYERN_SYNC_ENDPOINT` is empty) | No |
 | `RAYERN_MONITORING_TOKEN` | Bearer token sent to Rayern for the sync endpoint | No |
-| `RAYERN_SYNC_INTERVAL_MS` | How often to pull from Rayern (ms, default 300000) | No |
+| `RAYERN_SYNC_INTERVAL_MS` | How often to pull from Rayern (ms, default 600000 = 10 minutes) | No |
 | `RAYERN_SYNC_TIMEOUT_MS` | Per-request timeout (ms, default 15000) | No |
 
 ## Login

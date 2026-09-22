@@ -30,49 +30,63 @@ import { recordAudit } from './audit'
  * that is not listed here ("strip" is the default mode), so unexpected or
  * private fields are silently ignored — never validated into storage. */
 
+/* Rayern reports `null` for metrics it does not currently track (documented:
+ * `deletedAccounts30d`, `deletionRequestsPending`). A missing key and `null`
+ * are accepted ONLY as that "not tracked" sentinel and normalized to the
+ * field's zero value. Everything else must still satisfy the strict inner
+ * schema — non-negative numbers, integers where applicable, bounded
+ * percentages, strict date strings, enums — and unknown fields are still
+ * stripped. Wrong types ("5", true, -1, {}) remain validation failures. */
+const untrackedInt = z.preprocess((v) => (v === null || v === undefined ? 0 : v), z.number().int().min(0))
+const untrackedNum = z.preprocess((v) => (v === null || v === undefined ? 0 : v), z.number().min(0))
+const untrackedPct = z.preprocess((v) => (v === null || v === undefined ? 100 : v), z.number().min(0).max(100))
+const untrackedList = <S extends z.ZodTypeAny>(inner: S, max: number) =>
+  z.preprocess((v) => (v === null || v === undefined ? [] : v), z.array(inner).max(max))
+
 const AccountsAggregate = z.object({
+  // Core counts Rayern must report — null here is a real contract violation
+  // and must fail the sync (keeping the last known good aggregates).
   totalAccounts: z.number().int().min(0),
-  newAccounts30d: z.number().int().min(0).default(0),
-  verifiedAccounts: z.number().int().min(0).default(0),
-  unverifiedAccounts: z.number().int().min(0).default(0),
-  deletedAccounts30d: z.number().int().min(0).default(0),
-  deletionRequestsPending: z.number().int().min(0).default(0),
-  registrationsTrend: z
-    .array(z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), count: z.number().int().min(0) }))
-    .max(400)
-    .default([]),
+  newAccounts30d: untrackedInt,
+  verifiedAccounts: untrackedInt,
+  unverifiedAccounts: untrackedInt,
+  deletedAccounts30d: untrackedInt,
+  deletionRequestsPending: untrackedInt,
+  registrationsTrend: untrackedList(
+    z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), count: untrackedInt }),
+    400,
+  ),
   // Plan names are Rayern-owned aggregate labels (e.g. 'starter'). Accept any
   // short identifier so an unknown/new plan tier cannot break the whole sync.
-  planBreakdown: z
-    .array(z.object({ plan: z.string().min(1).max(50), count: z.number().int().min(0) }))
-    .max(20)
-    .default([]),
+  planBreakdown: untrackedList(z.object({ plan: z.string().min(1).max(50), count: untrackedInt }), 20),
 })
 
 const WorkspacesAggregate = z.object({
   totalWorkspaces: z.number().int().min(0),
-  newWorkspaces30d: z.number().int().min(0).default(0),
-  avgMembersPerWorkspace: z.number().min(0).default(0),
-  planBreakdown: z
-    .array(z.object({ plan: z.string().min(1).max(50), count: z.number().int().min(0) }))
-    .max(20)
-    .default([]),
+  newWorkspaces30d: untrackedInt,
+  avgMembersPerWorkspace: untrackedNum,
+  planBreakdown: untrackedList(z.object({ plan: z.string().min(1).max(50), count: untrackedInt }), 20),
 })
 
 const ServiceHealth = z.object({
   service: z.string().min(1).max(100),
   kind: z.enum(['api', 'database', 'cache', 'queue', 'email', 'storage']),
   status: z.enum(['healthy', 'degraded', 'failing']),
-  uptimePct30d: z.number().min(0).max(100).default(100),
-  latencyMsP50: z.number().min(0).default(0),
-  latencyMsP95: z.number().min(0).default(0),
+  uptimePct30d: untrackedPct,
+  latencyMsP50: untrackedNum,
+  latencyMsP95: untrackedNum,
   lastIncidentAt: z.string().datetime().nullable().default(null),
 })
 
+/** A section reported as `null` means "not provided yet" — treat it exactly
+ * like a missing section so the previously synchronized copy is kept. */
+const optionalSection = <S extends z.ZodTypeAny>(inner: S) =>
+  z.preprocess((v) => (v === null || v === undefined ? undefined : v), inner.optional())
+
 export const SyncPayload = z.object({
-  accounts: AccountsAggregate.optional(),
-  workspaces: WorkspacesAggregate.optional(),
-  services: z.array(ServiceHealth).max(20).optional(),
+  accounts: optionalSection(AccountsAggregate),
+  workspaces: optionalSection(WorkspacesAggregate),
+  services: optionalSection(z.array(ServiceHealth).max(20)),
 })
 
 export type SyncPayloadData = z.infer<typeof SyncPayload>
@@ -266,15 +280,44 @@ export function isSyncRunning(): boolean {
 
 export interface SyncResult {
   ok: boolean
-  skipped?: 'disabled' | 'already-running'
+  skipped?: 'disabled' | 'already-running' | 'rate-limited'
   error?: string
   sections?: string[]
+}
+
+/** Earliest wall-clock time the next pull may run after Rayern sent HTTP 429
+ * with a Retry-After header. In-memory only (reset on restart), capped at 1h.
+ * The scheduled interval stays the sole retry mechanism — there is never an
+ * immediate retry loop. */
+let rateLimitedUntil = 0
+
+/** Parses Retry-After: delta-seconds or an HTTP date. Null when absent/invalid. */
+function parseRetryAfter(header: string | null): number | null {
+  if (!header) return null
+  const secs = Number(header)
+  if (Number.isFinite(secs) && secs >= 0) return Math.floor(secs)
+  const dateMs = Date.parse(header)
+  if (!Number.isNaN(dateMs)) return Math.max(0, Math.ceil((dateMs - Date.now()) / 1000))
+  return null
+}
+
+/** Error carrying the HTTP status so failure recording can classify it. */
+function httpError(status: number, detail = ''): Error & { status: number } {
+  return Object.assign(new Error(`Rayern API responded with HTTP ${status}${detail}`), { status })
 }
 
 /** One pull cycle. Safe to call concurrently — overlap is prevented. */
 export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promise<SyncResult> {
   if (!rayernSyncEnabled()) return { ok: false, skipped: 'disabled' }
   if (running) return { ok: false, skipped: 'already-running' }
+  // Rayern told us to back off (HTTP 429 + Retry-After): skip scheduled pulls
+  // until the window passes. Nothing is attempted, recorded, or stored here —
+  // the previously synced aggregates stay untouched.
+  if (Date.now() < rateLimitedUntil) {
+    const waitSec = Math.ceil((rateLimitedUntil - Date.now()) / 1000)
+    console.log(`[dashboard-sync] skipping pull: Rayern rate-limit window still active (${waitSec}s left) — synced aggregates kept`)
+    return { ok: false, skipped: 'rate-limited' }
+  }
 
   running = true
   try {
@@ -302,7 +345,20 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
     }
 
     if (!res.ok) {
-      throw new Error(`Rayern API responded with HTTP ${res.status}`)
+      if (res.status === 429) {
+        // Rate limited: record the failure, keep the last known good data
+        // (storePayload is never reached), and respect Retry-After for when
+        // the next scheduled pull may run.
+        const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'))
+        if (retryAfterSec !== null) {
+          rateLimitedUntil = Math.max(rateLimitedUntil, Date.now() + Math.min(retryAfterSec, 3_600_000) * 1000)
+        }
+        console.log(
+          `[dashboard-sync] Rayern rate limited (HTTP 429)${retryAfterSec !== null ? `; Retry-After=${retryAfterSec}s` : ''} — failure recorded, previously synced aggregates kept`,
+        )
+        throw httpError(429, ` (rate limited)${retryAfterSec !== null ? `; retry after ${retryAfterSec}s` : ''}`)
+      }
+      throw httpError(res.status)
     }
 
     const raw: unknown = await res.json()
@@ -320,15 +376,28 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
     const parsed = SyncPayload.safeParse(unwrapped.value)
     if (!parsed.success) {
       // Invalid/unrecognized payload: reject entirely rather than storing a
-      // partial trust boundary violation. Only the schema path of the first
-      // issue is logged — never payload values.
-      const firstPath = parsed.error.issues[0]?.path?.join('.') ?? 'unknown'
+      // partial trust boundary violation. Only schema paths of the failing
+      // fields are logged (our own field names — never payload values).
+      const paths = parsed.error.issues
+        .slice(0, 12)
+        .map((i) => i.path.join('.') || 'root')
       console.log(
-        `[dashboard-sync] validation failed: issues=${parsed.error.issues.length} firstPath=${firstPath} shape=${describeSyncShape(raw)}`,
+        `[dashboard-sync] validation failed: issues=${parsed.error.issues.length} paths=${paths.join(',')} shape=${describeSyncShape(raw)}`,
       )
       throw new Error(
-        `Rayern sync payload failed validation (${parsed.error.issues.length} issue(s), first at ${firstPath}); nothing was stored`,
+        `Rayern sync payload failed validation (${parsed.error.issues.length} issue(s), paths: ${paths.join(',')}); nothing was stored`,
       )
+    }
+
+    // An empty/sectionless container parses fine (all sections optional) but
+    // must NOT be persisted or marked as a healthy sync — that was the original
+    // "sections=none" bug. Record it as a failure and keep existing data.
+    const hasSections =
+      parsed.data.accounts !== undefined ||
+      parsed.data.workspaces !== undefined ||
+      (parsed.data.services?.length ?? 0) > 0
+    if (!hasSections) {
+      throw new Error('Rayern sync payload contained no aggregate sections; nothing was stored')
     }
 
     // Safe diagnostics: aggregate counts only — never the monitoring token,

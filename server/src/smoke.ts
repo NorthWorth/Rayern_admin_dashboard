@@ -10,8 +10,11 @@
  *       * dashboard GETs Rayern with the monitoring token (Rayern never pushes)
  *       * successful pull stores approved aggregates (served by platform-metrics)
  *       * privacy boundary: unexpected/private fields are stripped, wrong types rejected
- *       * Rayern auth failure / slow responses → failure recorded, dashboard survives,
- *         previously synchronized data retained, automatic recovery
+ *       * Rayern auth failure / HTTP 429 rate limit (Retry-After respected) /
+ *         slow responses / malformed or empty payloads → failure recorded,
+ *         dashboard survives, previously synchronized data retained, automatic
+ *         recovery; nullable untracked metrics (deletedAccounts30d: null) and
+ *         the 'starter' plan tier accepted by the contract
  *   - emails: validation, server-enforced From, cross-field dedup, dry-run,
  *     history without bodies, copy-body endpoint, audience endpoint
  *   - the old push endpoint /sync/rayern is gone
@@ -140,6 +143,7 @@ interface MockRayern {
   server: Server
   setPayload: (payload: unknown) => void
   setUnauthorized: (v: boolean) => void
+  setRateLimited: (v: boolean, retryAfterSec?: number) => void
   setDelayMs: (ms: number) => void
   requestCount: () => number
   lastAuthHeader: () => string | null
@@ -148,6 +152,8 @@ interface MockRayern {
 function startMockRayern(): Promise<MockRayern> {
   let payload: unknown = { ok: true }
   let unauthorized = false
+  let rateLimited = false
+  let retryAfterSec: number | null = null
   let delayMs = 0
   let count = 0
   let lastAuth: string | null = null
@@ -155,6 +161,14 @@ function startMockRayern(): Promise<MockRayern> {
   const server = createServer((req, res) => {
     count++
     lastAuth = req.headers.authorization ?? null
+    if (rateLimited) {
+      res.writeHead(429, {
+        'Content-Type': 'application/json',
+        ...(retryAfterSec !== null ? { 'Retry-After': String(retryAfterSec) } : {}),
+      })
+      res.end(JSON.stringify({ error: 'too many requests' }))
+      return
+    }
     if (unauthorized) {
       res.writeHead(401, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: 'invalid monitoring token' }))
@@ -172,6 +186,10 @@ function startMockRayern(): Promise<MockRayern> {
         server,
         setPayload: (p) => (payload = p),
         setUnauthorized: (v) => (unauthorized = v),
+        setRateLimited: (v, secs) => {
+          rateLimited = v
+          retryAfterSec = secs ?? null
+        },
         setDelayMs: (ms) => (delayMs = ms),
         requestCount: () => count,
         lastAuthHeader: () => lastAuth,
@@ -186,8 +204,9 @@ const GOOD_AGGREGATES = {
     newAccounts30d: 42,
     verifiedAccounts: 1100,
     unverifiedAccounts: 134,
-    deletedAccounts30d: 3,
-    deletionRequestsPending: 1,
+    // Rayern does not track these yet and reports null (documented contract).
+    deletedAccounts30d: null,
+    deletionRequestsPending: null,
     registrationsTrend: [
       { date: '2026-09-19', count: 10 },
       { date: '2026-09-20', count: 12 },
@@ -199,7 +218,13 @@ const GOOD_AGGREGATES = {
       { plan: 'team', count: 84 },
     ],
   },
-  workspaces: { totalWorkspaces: 87, newWorkspaces30d: 5, avgMembersPerWorkspace: 3.2 },
+  workspaces: {
+    totalWorkspaces: 87,
+    newWorkspaces30d: 5,
+    avgMembersPerWorkspace: 3.2,
+    // Rayern's actual plan tier — must be accepted by the contract.
+    planBreakdown: [{ plan: 'starter', count: 87 }],
+  },
   services: [
     { service: 'Rayern API', kind: 'api', status: 'healthy', uptimePct30d: 99.98, latencyMsP50: 41, latencyMsP95: 180, lastIncidentAt: null },
   ],
@@ -338,6 +363,22 @@ async function main(): Promise<void> {
     check('synced aggregates served by platform-metrics', m2.dataSource === 'rayern-sync' && m2.registeredAccounts === 1234)
     check('registrationsTrend preserved from sync', Array.isArray(m2.registrationsTrend) && (m2.registrationsTrend as unknown[]).length === 3)
     check('workspace aggregate served', m2.totalWorkspaces === 87)
+    check(
+      'nullable untracked metrics normalized to 0 (not null, not missing)',
+      m2.deletedAccounts30d === 0 && m2.deletionRequestsPending === 0,
+      `deleted=${String(m2.deletedAccounts30d)} pending=${String(m2.deletionRequestsPending)}`,
+    )
+    check(
+      'starter plan tier accepted from Rayern',
+      Array.isArray(m2.planBreakdown) && (m2.planBreakdown as Array<{ plan?: string }>).some((p) => p.plan === 'starter'),
+    )
+    const usSynced = (await req('GET', '/users/stats', undefined, token)).json as {
+      totalUsers?: number
+      deleted30d?: number
+    }
+    check('users/stats serves synced aggregates', usSynced.totalUsers === 1234 && usSynced.deleted30d === 0, `totalUsers=${String(usSynced.totalUsers)}`)
+    const wsSynced = (await req('GET', '/workspaces/stats', undefined, token)).json as { total?: number }
+    check('workspaces/stats serves synced aggregates', wsSynced.total === 87, `total=${String(wsSynced.total)}`)
 
     const sys2j = (await req('GET', '/system/overview', undefined, token)).json as {
       sync?: { status?: string; lastSuccessAt?: string | null }
@@ -362,9 +403,40 @@ async function main(): Promise<void> {
     const metricsStr = JSON.stringify(metrics3.json)
     check('private fields never stored (no clients/projects/activity anywhere)', !metricsStr.includes('Acme') && !metricsStr.includes('Secret project') && !metricsStr.includes('u1'))
 
-    // Direct schema check: wrong types are rejected outright.
-    const { SyncPayload } = await import('./rayernSync')
+    // Direct contract checks (no extra sync cycle needed).
+    const { SyncPayload, unwrapRayernEnvelope } = await import('./rayernSync')
     check('invalid aggregate types rejected', SyncPayload.safeParse({ accounts: { totalAccounts: 'not-a-number' } }).success === false)
+
+    const nullableRun = SyncPayload.safeParse({
+      accounts: { totalAccounts: 61, deletedAccounts30d: null, deletionRequestsPending: null },
+    })
+    check(
+      'nullable untracked metrics accepted and normalized (production contract)',
+      nullableRun.success &&
+        nullableRun.data.accounts?.deletedAccounts30d === 0 &&
+        nullableRun.data.accounts?.deletionRequestsPending === 0,
+      nullableRun.success ? '' : `issues=${nullableRun.error.issues.map((i) => i.path.join('.')).join(',')}`,
+    )
+    check(
+      'wrong-typed untracked metrics still rejected',
+      SyncPayload.safeParse({ accounts: { totalAccounts: 1, deletionRequestsPending: 'pending' } }).success === false &&
+        SyncPayload.safeParse({ accounts: { totalAccounts: 1, deletedAccounts30d: -5 } }).success === false &&
+        SyncPayload.safeParse({ accounts: { totalAccounts: 1, newAccounts30d: '42' } }).success === false,
+    )
+    check('null core total rejected (counts must never be invented)', SyncPayload.safeParse({ accounts: { totalAccounts: null } }).success === false)
+    const nullSections = SyncPayload.safeParse({ accounts: { totalAccounts: 1 }, workspaces: null, services: null })
+    check(
+      'null sections treated as absent (previous copy kept)',
+      nullSections.success && nullSections.data.workspaces === undefined && nullSections.data.services === undefined,
+    )
+    const emptyContainer = SyncPayload.safeParse({})
+    check(
+      'empty container parses to zero sections (worker rejects it)',
+      emptyContainer.success && emptyContainer.data.accounts === undefined && emptyContainer.data.workspaces === undefined,
+    )
+    check('success=false envelope treated as failure', unwrapRayernEnvelope({ success: false, error: {} }).ok === false)
+    const strippedRun = SyncPayload.safeParse({ accounts: { totalAccounts: 1, secretClientEmail: 'x@y.z' } })
+    check('unknown/private fields stripped (privacy)', strippedRun.success && !('secretClientEmail' in (strippedRun.data.accounts ?? {})))
 
     console.log('\n— pull-sync: Rayern auth failure (dashboard survives, data retained) —')
     rayern.setUnauthorized(true)
@@ -426,9 +498,98 @@ async function main(): Promise<void> {
     }
     check('recovers automatically on next cycle', sync6.status === 'healthy' && sync6.consecutiveFailures === 0, `status=${sync6.status} consecutiveFailures=${sync6.consecutiveFailures}`)
 
-    console.log('\n— overlap guard: request count matches schedule —')
-    // Elapsed ticks since boot ≈ 10 → at most 12 requests if no overlap doubling.
-    check('no overlapping duplicate pulls', rayern.requestCount() <= 12, `count=${rayern.requestCount()}`)
+    console.log('\n— pull-sync: HTTP 429 rate limit (failure recorded, data kept, Retry-After respected) —')
+    rayern.setRateLimited(true, 45)
+    const rlDeadline = Date.now() + 45_000
+    let syncRL = await syncStatus(token)
+    while (Date.now() < rlDeadline && !(syncRL.lastError ?? '').includes('429')) {
+      await sleep(500)
+      syncRL = await syncStatus(token)
+    }
+    check('HTTP 429 recorded as sync failure', (syncRL.lastError ?? '').includes('429'), `lastError=${syncRL.lastError ?? 'null'}`)
+    const mRL = (await req('GET', '/platform-metrics/overview', undefined, token)).json as {
+      registeredAccounts?: number
+      dataSource?: string
+    }
+    check(
+      'previously synced data kept during rate limit (not zeroed)',
+      mRL.registeredAccounts === 1234 && mRL.dataSource === 'rayern-sync',
+      `registeredAccounts=${String(mRL.registeredAccounts)}`,
+    )
+    const errs429 = (await req('GET', '/errors', undefined, token)).json as Array<{ service?: string; statusCode?: number }>
+    check(
+      '429 stored as operational error with status code',
+      errs429.some((e) => e.service === 'Rayern Sync' && e.statusCode === 429),
+    )
+
+    // Retry-After=45s spans the next scheduled tick (~30s): that tick must be
+    // skipped entirely — no new attempt, no hammering, no data changes.
+    const attemptAfter429 = (await syncStatus(token)).lastAttemptAt
+    await sleep(35_000)
+    const attemptDuringWindow = (await syncStatus(token)).lastAttemptAt
+    check(
+      'scheduled pull skipped inside Retry-After window',
+      attemptDuringWindow === attemptAfter429,
+      `attempt before=${String(attemptAfter429)} during=${String(attemptDuringWindow)}`,
+    )
+    rayern.setRateLimited(false)
+
+    console.log('\n— pull-sync: malformed payload (validation failure, data kept) —')
+    rayern.setPayload({
+      success: true,
+      data: {
+        accounts: { totalAccounts: 'not-a-number', deletedAccounts30d: null },
+        workspaces: { totalWorkspaces: 99, planBreakdown: 'oops' },
+      },
+    })
+    const valDeadline = Date.now() + 60_000
+    let syncVal = await syncStatus(token)
+    while (Date.now() < valDeadline && !(syncVal.lastError ?? '').includes('failed validation')) {
+      await sleep(500)
+      syncVal = await syncStatus(token)
+    }
+    check('malformed payload → validation failure recorded', (syncVal.lastError ?? '').includes('failed validation'), `lastError=${syncVal.lastError ?? 'null'}`)
+    const mVal = (await req('GET', '/platform-metrics/overview', undefined, token)).json as { registeredAccounts?: number }
+    check('previous synced data kept after validation failure', mVal.registeredAccounts === 1234, `registeredAccounts=${String(mVal.registeredAccounts)}`)
+
+    console.log('\n— pull-sync: empty payload container rejected —')
+    rayern.setPayload({ success: true, data: {} })
+    const emptyDeadline = Date.now() + 60_000
+    let syncEmpty = await syncStatus(token)
+    while (Date.now() < emptyDeadline && !(syncEmpty.lastError ?? '').includes('no aggregate sections')) {
+      await sleep(500)
+      syncEmpty = await syncStatus(token)
+    }
+    check('empty payload recorded as failure (not fake-healthy)', (syncEmpty.lastError ?? '').includes('no aggregate sections'), `lastError=${syncEmpty.lastError ?? 'null'}`)
+    const mEmpty = (await req('GET', '/platform-metrics/overview', undefined, token)).json as { registeredAccounts?: number }
+    check('empty payload did not erase synced data', mEmpty.registeredAccounts === 1234, `registeredAccounts=${String(mEmpty.registeredAccounts)}`)
+
+    console.log('\n— pull-sync: recovery after failure sequence —')
+    rayern.setPayload({ success: true, data: GOOD_AGGREGATES })
+    const finalDeadline = Date.now() + 60_000
+    let syncFinal = await syncStatus(token)
+    while (Date.now() < finalDeadline && !(syncFinal.status === 'healthy' && syncFinal.consecutiveFailures === 0)) {
+      await sleep(500)
+      syncFinal = await syncStatus(token)
+    }
+    check(
+      'recovers to healthy after failure sequence',
+      syncFinal.status === 'healthy' && syncFinal.consecutiveFailures === 0,
+      `status=${syncFinal.status} consecutiveFailures=${syncFinal.consecutiveFailures}`,
+    )
+
+    console.log('\n— overlap guard: at most one pull per interval —')
+    // The worker's interval is clamped to 30s minimum in config. In a 35s
+    // window at most 2 pulls can legitimately land (one tick + boundary);
+    // an overlap bug would double that.
+    const pullsBefore = rayern.requestCount()
+    await sleep(35_000)
+    const pullsAfter = rayern.requestCount()
+    check(
+      'no overlapping duplicate pulls (≤2 in one interval)',
+      pullsAfter - pullsBefore <= 2,
+      `got ${pullsAfter - pullsBefore}`,
+    )
 
     console.log('\n— emails (validation, enforced From, dedup, dry-run, copy) —')
     const emailStats = await req('GET', '/emails/stats', undefined, token)
