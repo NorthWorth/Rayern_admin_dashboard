@@ -3,4 +3,4 @@
  * /healthz can prove which code a running instance is executing (Render
  * redeployments, staging drift, etc.). Values only — no secrets.
  */
-export const SERVER_VERSION = '2026-09-22.1-synced-aggregates'
+export const SERVER_VERSION = '2026-09-22.2-envelope-sync'
