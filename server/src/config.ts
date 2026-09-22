@@ -37,6 +37,8 @@ export const config = {
   // injects PORT for the frontend dev server (they run side by side in dev).
   port: Number(process.env.API_PORT ?? process.env.PORT ?? 4000),
   databaseUrl: required('DATABASE_URL', true),
+  /** Managed-Postgres CA certificate (PEM, e.g. Aiven) for SSL verification; '' when unset. */
+  databaseCaCert: trimmed('DATABASE_CA_CERT'),
   jwtSecret: optionalWithDevFallback('ADMIN_JWT_SECRET', 'ephemeral JWT secret'),
   // In production, restrict to exact origins. In dev, allow all — the API
   // uses bearer tokens (not cookies) so CORS is defense-in-depth only.

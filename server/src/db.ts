@@ -34,10 +34,40 @@ export const USING_EMBEDDED_DB = !config.databaseUrl
 export const EMBEDDED_PG_PORT = Number(process.env.EMBEDDED_PG_PORT ?? 54329)
 
 export const pool = new Pool({
-  connectionString: config.databaseUrl || `postgres://postgres:postgres@127.0.0.1:${EMBEDDED_PG_PORT}/admin`,
+  // When a CA cert is supplied, strip sslmode from the URL: pg merges URL params
+  // OVER Pool options, so a URL `?sslmode=require` would otherwise replace our
+  // pinned-CA ssl config with its own weaker defaults.
+  connectionString: config.databaseCaCert
+    ? stripSslModeParam(config.databaseUrl || `postgres://postgres:postgres@127.0.0.1:${EMBEDDED_PG_PORT}/admin`)
+    : config.databaseUrl || `postgres://postgres:postgres@127.0.0.1:${EMBEDDED_PG_PORT}/admin`,
   max: USING_EMBEDDED_DB ? 1 : 10,
   idleTimeoutMillis: 30_000,
+  // Managed Postgres (e.g. Aiven, sslmode=require) presents a CA-signed chain.
+  // Pin the CA so verification succeeds instead of failing with SELF_SIGNED_CERT_IN_CHAIN.
+  // Env vars can mangle multiline PEMs (literal "\n" or missing final newline).
+  ...(config.databaseCaCert
+    ? { ssl: { ca: normalizePem(config.databaseCaCert), rejectUnauthorized: true } }
+    : {}),
 })
+
+/** Removes sslmode and legacy ssl params from a connection string's query part. */
+function stripSslModeParam(connectionString: string): string {
+  try {
+    const url = new URL(connectionString)
+    for (const key of ['sslmode', 'ssl', 'sslrootcert', 'sslcert', 'sslkey']) {
+      url.searchParams.delete(key)
+    }
+    return url.toString()
+  } catch {
+    return connectionString
+  }
+}
+
+/** Repairs PEMs delivered through env vars: literal "\n" -> real newlines, single trailing newline. */
+function normalizePem(pem: string): string {
+  const decoded = pem.includes('\\n') && !pem.includes('\n') ? pem.replace(/\\n/g, '\n') : pem
+  return decoded.endsWith('\n') ? decoded : `${decoded}\n`
+}
 
 /**
  * Degraded-mode flag: when the database cannot be initialized the API still
