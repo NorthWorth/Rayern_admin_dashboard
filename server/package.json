@@ -9,11 +9,17 @@
     "typecheck": "tsc --noEmit",
     "check": "tsc --noEmit",
     "build": "tsc",
-    "smoke": "bun run src/smoke.ts"
+    "smoke": "bun run src/smoke.ts",
+    "telemetry-test": "bun run src/telemetryTest.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.8",
     "@electric-sql/pglite-socket": "^0.2.11",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/context-async-hooks": "^2.11.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.222.0",
+    "@opentelemetry/resources": "^2.11.0",
+    "@opentelemetry/sdk-trace-base": "^2.11.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "express": "^4.21.2",

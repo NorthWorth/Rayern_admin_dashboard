@@ -59,6 +59,45 @@ export function titleCase(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
+/* ------------------------- Audience (recipient counts) --------------------- */
+
+export interface AudienceSummary {
+  total: number
+  to: number
+  cc: number
+  bcc: number
+  /** Compact aggregate label, e.g. "250 recipients" — never a raw address list. */
+  label: string
+  /** "1 To · 5 CC · 244 BCC" when CC/BCC are in play, otherwise null. */
+  breakdown: string | null
+}
+
+/**
+ * Compact recipient summary for bulk-send-safe rendering. Tables and audit
+ * rows must NEVER render hundreds of addresses — they render these counts;
+ * the underlying recipient arrays stay available for details views/audit.
+ */
+export function audienceSummary(to: string[], cc: string[], bcc: string[]): AudienceSummary {
+  const t = to.length
+  const c = cc.length
+  const b = bcc.length
+  const total = t + c + b
+  return {
+    total,
+    to: t,
+    cc: c,
+    bcc: b,
+    label: `${total} recipient${total === 1 ? '' : 's'}`,
+    breakdown: c > 0 || b > 0 ? `${t} To · ${c} CC · ${b} BCC` : null,
+  }
+}
+
+/** Single-line audience text for compact rows: "250 recipients · 1 To · …". */
+export function audienceLine(to: string[], cc: string[], bcc: string[]): string {
+  const a = audienceSummary(to, cc, bcc)
+  return a.breakdown ? `${a.label} · ${a.breakdown}` : a.label
+}
+
 /** Deterministic past date offset from now, used by the demo data layer. */
 export function daysAgoIso(days: number, hour = 12): string {
   const d = new Date()

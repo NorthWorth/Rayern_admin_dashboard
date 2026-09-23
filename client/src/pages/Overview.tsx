@@ -10,7 +10,7 @@ import { emailsService } from '../services/emails'
 import { systemService } from '../services/system'
 import { usersService } from '../services/users'
 import { workspacesService } from '../services/workspaces'
-import { formatDateTime, formatNumber, titleCase } from '../lib/utils'
+import { audienceLine, formatDateTime, formatNumber, titleCase } from '../lib/utils'
 import type { EmailMessage, HealthStatus } from '../lib/types'
 
 function healthTone(s: HealthStatus): 'green' | 'amber' | 'red' {
@@ -42,7 +42,13 @@ export function OverviewPage() {
           label="System status"
           value={systemQ.data ? titleCase(systemQ.data.overall) : '—'}
           tone={systemQ.data?.overall === 'healthy' ? 'green' : systemQ.data?.overall === 'degraded' ? 'amber' : 'red'}
-          sub={systemQ.data ? `${systemQ.data.errorRatePct.toFixed(2)}% error rate · p95 ${systemQ.data.latency.p95}ms` : undefined}
+          sub={
+            systemQ.data
+              ? systemQ.data.errorRatePct !== null && systemQ.data.latency.p95 !== null
+                ? `${systemQ.data.errorRatePct.toFixed(2)}% error rate · p95 ${systemQ.data.latency.p95}ms`
+                : 'No telemetry measured yet'
+              : undefined
+          }
         />
       </div>
 
@@ -113,7 +119,7 @@ export function OverviewPage() {
                   <tr key={e.id} className="border-b border-ink-100 last:border-0">
                     <td className="max-w-0 px-4 py-2.5">
                       <p className="truncate font-medium text-ink-800">{e.subject}</p>
-                      <p className="truncate text-xs text-ink-500">{e.to.join(', ')} · {formatDateTime(e.sentAt)}</p>
+                      <p className="truncate text-xs text-ink-500">{audienceLine(e.to, e.cc, e.bcc)} · {formatDateTime(e.sentAt)}</p>
                     </td>
                     <td className="whitespace-nowrap px-4 py-2.5 text-right">
                       <StatusBadge tone={emailStatusTone(e.status)}>{titleCase(e.status)}</StatusBadge>

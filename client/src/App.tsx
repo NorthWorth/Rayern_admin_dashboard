@@ -158,10 +158,11 @@ function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   )
 }
 
-/** Desktop sidebar — unchanged behavior, visible at the md breakpoint and above. */
+/** Desktop sidebar — visible at the md breakpoint and above. Sticky so it
+ *  stays in view while the PAGE scrolls (normal browser scrollbar). */
 function Sidebar() {
   return (
-    <aside className="hidden w-60 shrink-0 flex-col border-r border-ink-800 bg-ink-900 text-ink-100 md:flex">
+    <aside className="sticky top-0 hidden h-screen shrink-0 flex-col border-r border-ink-800 bg-ink-900 text-ink-100 md:flex">
       <div className="flex h-14 items-center gap-2.5 border-b border-ink-800 px-4">
         <SidebarBrand />
       </div>
@@ -249,7 +250,7 @@ interface TopbarProps {
 function Topbar({ onSignOut, menuOpen, onOpenMenu, menuButtonRef }: TopbarProps) {
   const operator = session.operator()
   return (
-    <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-ink-200 bg-white px-6">
+    <header className="sticky top-0 z-30 flex h-14 shrink-0 items-center justify-between gap-3 border-b border-ink-200 bg-white px-4 sm:px-6">
       <button
         ref={menuButtonRef}
         type="button"
@@ -334,6 +335,7 @@ function Shell({ onSignOut }: { onSignOut: () => void }) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const menuButtonRef = useRef<HTMLButtonElement | null>(null)
   const wasOpenRef = useRef(false)
+  const { pathname } = useLocation()
 
   const closeMobileNav = useCallback(() => setMobileNavOpen(false), [])
 
@@ -343,8 +345,17 @@ function Shell({ onSignOut }: { onSignOut: () => void }) {
     wasOpenRef.current = mobileNavOpen
   }, [mobileNavOpen])
 
+  // The app now uses the ONE normal page-level scroll (the browser's own), so
+  // navigating to a new route starts at the top like a regular website.
+  useEffect(() => {
+    window.scrollTo(0, 0)
+  }, [pathname])
+
   return (
-    <div className="flex h-screen overflow-hidden">
+    // min-h-screen (NOT h-screen + overflow-hidden): the document scrolls
+    // normally with a single browser scrollbar — there is no nested
+    // application scroll container around <main> anymore.
+    <div className="flex min-h-screen">
       <Sidebar />
       <MobileSidebar open={mobileNavOpen} onClose={closeMobileNav} />
       <div className="flex min-w-0 flex-1 flex-col">
@@ -354,7 +365,7 @@ function Shell({ onSignOut }: { onSignOut: () => void }) {
           onOpenMenu={() => setMobileNavOpen(true)}
           menuButtonRef={menuButtonRef}
         />
-        <main className="flex-1 overflow-y-auto scrollbar-thin">
+        <main className="flex-1 min-w-0">
           <Routes>
             <Route path="/" element={<OverviewPage />} />
             <Route path="/users" element={<UsersPage />} />

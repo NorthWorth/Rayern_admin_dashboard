@@ -160,8 +160,23 @@ bun run dev:server   # API server only
 | `RAYERN_SYNC_ENDPOINT` | Full URL of the Rayern metrics endpoint the dashboard pulls from | No (sync disabled if empty) |
 | `RAYERN_API_BASE_URL` | Base URL of the Rayern API (used to construct sync endpoint if `RAYERN_SYNC_ENDPOINT` is empty) | No |
 | `RAYERN_MONITORING_TOKEN` | Bearer token sent to Rayern for the sync endpoint | No |
-| `RAYERN_SYNC_INTERVAL_MS` | How often to pull from Rayern (ms, default 600000 = 10 minutes) | No |
+| `RAYERN_SYNC_INTERVAL_MS` | How often to pull from Rayern (ms, default 1800000 = 30 minutes) | No |
 | `RAYERN_SYNC_TIMEOUT_MS` | Per-request timeout (ms, default 15000) | No |
+| `TELEMETRY_ENABLED` | Master switch for OpenTelemetry/local telemetry (default `true`; `OTEL_SDK_DISABLED=true` also disables) | No |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP base endpoint for trace export (unset = local telemetry only) | No |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Full OTLP traces URL (wins over the base endpoint) | No |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Standard OTLP auth headers (`key=value,key2=value2`) | No |
+| `OTEL_SERVICE_NAME` | Telemetry service name (default `rayern-admin-dashboard-api`) | No |
+| `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG` | Standard OTel sampler (affects OTLP export only; default always-on) | No |
+| `TELEMETRY_ENVIRONMENT` | `deployment.environment` resource attribute (default `NODE_ENV`) | No |
+| `TELEMETRY_SLOW_REQUEST_MS` / `TELEMETRY_SLOW_QUERY_MS` | Slow request/query thresholds (defaults 1000 / 250) | No |
+| `TELEMETRY_FLUSH_MS` | Telemetry persistence batch interval (default 10000) | No |
+| `TELEMETRY_*_RETENTION_HOURS` | Telemetry table retention (defaults: traces 48h, request log / span metrics 168h) | No |
+| `HEALTH_MIN_SAMPLES` | Samples required before latency/availability are reported (default 10; below → null) | No |
+| `HEALTH_ERROR_RATE_DEGRADED_PCT` / `HEALTH_ERROR_RATE_FAILING_PCT` | API error-rate thresholds (defaults 1 / 5) | No |
+| `HEALTH_LATENCY_P95_DEGRADED_MS` / `HEALTH_LATENCY_P95_FAILING_MS` | API p95 latency thresholds (defaults 500 / 2000) | No |
+| `HEALTH_AVAILABILITY_DEGRADED_PCT` / `HEALTH_AVAILABILITY_FAILING_PCT` | Availability thresholds (defaults 99 / 95) | No |
+| `HEALTH_DB_ERROR_RATE_DEGRADED_PCT` / `HEALTH_DB_ERROR_RATE_FAILING_PCT` | PostgreSQL query error-rate thresholds (defaults 1 / 10) | No |
 
 ## Login
 
@@ -190,6 +205,18 @@ The dashboard's email system is independent from Rayern's automated transactiona
 
 The email composer supports To, CC, BCC (each with multiple recipients), bulk "select all recipients", email type selection, and "copy as new email" from past sends. The sender identity is enforced server-side as `Rayern <support@rayern.com.ng>`.
 
+**Recipient rule.** A send is allowed when To, CC **or** BCC contains at least one recipient; it is rejected only when all three are empty. CC-only and BCC-only sends go out exactly as composed — no To address is ever invented, so BCC stays invisible to other recipients.
+
+> Provider note: the installed `resend@4.8.0` SDK types `to` as a required `string | string[]` (API docs: required, max 50) and documents no empty-`to` representation. The dashboard therefore always includes the field — as an **empty array** for CC/BCC-only sends — rather than fabricating a recipient. If Resend's API rejects an empty `to`, the provider error surfaces as a normal, recorded send failure; no misleading workaround is applied.
+
+**Body modes.** The composer has an explicit **Plain Text | HTML** switch carried through the request as `bodyType`:
+
+- Plain Text → the body goes to Resend's `text` field only (typed HTML tags stay literal).
+- HTML → the body is sanitized (scripts, frames, event handlers and `javascript:` URLs stripped), normalized into a document (fragments like `<p>Hello</p>` need no boilerplate), and goes to Resend's `html` field only. A sandboxed, script-free iframe provides a browser-like preview.
+- The mode is stored with the history record, shown as metadata in the table, and preserved by "copy as new" (which never auto-sends).
+
+**Bulk sends.** Email history and the Audit Log render audience **counts** (`250 recipients` / `1 To · 5 CC · 244 BCC`) — never hundreds of addresses. Full recipient metadata stays in the database and is reachable through the audit **Details** view; email bodies are never displayed in either table.
+
 ## Service layer
 
 All API communication lives in `client/src/services/` — no `fetch` calls in components.
@@ -206,6 +233,26 @@ All API communication lives in `client/src/services/` — no `fetch` calls in co
 | `auditService`           | `/audit`                                         |
 | `session / login`        | `POST /auth/login`                              |
 
+## Telemetry (OpenTelemetry)
+
+The backend instruments its **own** operations with the standard OpenTelemetry API/SDK and an optional OTLP/HTTP exporter:
+
+- **HTTP requests** → SERVER spans with route *templates* (`GET /users/stats`), status, duration; p50/p95/p99, error rate, slow requests, request volume.
+- **PostgreSQL** → CLIENT spans per query with a sanitized statement template (literals redacted, parameters never leave the driver); query duration/errors/slow queries and pool failures.
+- **Internal/external operations** → `rayern.sync` (INTERNAL) with `rayern.fetch` and `resend.send` as CHILD spans — proper parent/child trace relationships.
+- **Runtime** → process uptime, memory, CPU, event-loop delay.
+- **Health** → deterministic `healthy`/`degraded`/`failing` from configurable `HEALTH_*` thresholds. With insufficient telemetry the measured fields are `null` (rendered `—`) — never a fake `0ms`/`100%`.
+
+Architecture: spans → `BatchSpanProcessor` → OTLP endpoint (optional), and aggregate-only local records → rolling windows + batched persistence feeding `request_log`, `trace_spans`, `service_telemetry`, `slow_operations`, `span_metrics`, and `errors` (API 5xx) — the tables behind the System and Observability pages. Telemetry persistence runs with tracing **suppressed**, so writing telemetry can never generate telemetry.
+
+**Never recorded:** Authorization headers/JWTs, cookies, API keys, request/response bodies, emails, user or workspace identifiers, query strings, raw paths with ids, or SQL parameters. This is enforced by `server/src/telemetry/sanitize.ts` and asserted by the telemetry test.
+
+Telemetry is fully optional: unset every variable and the API starts and serves normally; an unreachable OTLP endpoint (or a telemetry failure of any kind) never fails startup or a request.
+
+```bash
+cd server && bun run telemetry-test   # telemetry suite (spans, redaction, exporter failure, disabled mode)
+```
+
 ## Smoke test
 
 ```bash
@@ -220,11 +267,11 @@ Starts the API (embedded PGlite), exercises all endpoints (auth, users, workspac
 - **Users** — searchable, filterable account administration table (verification status, account status, registration date) with no workspace-content drill-downs.
 - **Workspaces** — aggregate registration metadata only: name, member count, plan, creation date. No owners' emails, contents, or activity.
 - **Platform Metrics** — privacy-safe aggregates: registered accounts, new registrations over time, verified vs unverified, deletions, pending deletion requests, workspace totals and plan breakdown.
-- **Emails / Send Email** — admin-initiated sending only. Composer with From (fixed: `Rayern <support@rayern.com.ng>`), To, CC, BCC, subject, message, email type; validation, sending state, success/failure feedback, and send history. Supports bulk "select all recipients" and "copy as new email".
+- **Emails / Send Email** — admin-initiated sending only. Composer with From (fixed: `Rayern <support@rayern.com.ng>`), To, CC, BCC (any non-empty combination is sendable), Plain Text/HTML body mode with sandboxed preview, subject, email type; validation, sending state, success/failure feedback, and a bulk-safe send history (audience counts, mode, copy as new).
 - **System** — overall status, service availability (uptime, latency), request volume, latency percentiles, recent failures, Rayern sync status.
 - **Errors** — searchable error list with severity, service/endpoint, status code, occurrences; detail drawer with trace ID.
 - **Observability** — OpenTelemetry-focused: service telemetry, error-rate trend, recent slow operations, trace/span explorer.
-- **Audit Log** — admin/system events with actor, action, target, metadata, timestamp.
+- **Audit Log** — admin/system events with actor, action, target, compact metadata (recipient counts, never stacked address lists), timestamp, and a privacy-conscious details view; responsive card layout on mobile.
 
 ## Design system
 

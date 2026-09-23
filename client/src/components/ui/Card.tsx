@@ -12,7 +12,7 @@ export function CardHeader({ title, subtitle, actions }: { title: string; subtit
         <h3 className="text-sm font-semibold text-ink-900">{title}</h3>
         {subtitle ? <p className="mt-0.5 text-xs text-ink-500">{subtitle}</p> : null}
       </div>
-      {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
+      {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
     </div>
   )
 }

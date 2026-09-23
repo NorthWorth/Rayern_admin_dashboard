@@ -26,12 +26,22 @@ import errorsRoutes from './routes/errors'
 import observabilityRoutes from './routes/observability'
 import auditRoutes from './routes/audit'
 import { startSyncWorker } from './rayernSync'
+import { initTelemetry, telemetryMiddleware } from './telemetry'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+// OpenTelemetry + local telemetry pipeline: optional, env-configured, and
+// fail-safe (a telemetry problem can never stop the API from starting).
+// Must initialize before the first database query so the pg patch is active.
+initTelemetry()
 
 const app = express()
 app.set('trust proxy', 1)
 app.disable('x-powered-by')
+
+// First middleware: spans every request (incl. preflight/static/404/401) and
+// provides the parent context for downstream DB and internal spans.
+app.use(telemetryMiddleware)
 
 app.use(
   helmet({

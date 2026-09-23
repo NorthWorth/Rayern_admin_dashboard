@@ -26,6 +26,51 @@ function trimmed(name: string): string {
   return process.env[name]?.trim() ?? ''
 }
 
+/** Numeric env with fallback + clamping. Invalid values fall back silently. */
+function envNumber(name: string, fallback: number, min: number, max: number): number {
+  const raw = Number(process.env[name])
+  if (!Number.isFinite(raw)) return fallback
+  return Math.min(Math.max(raw, min), max)
+}
+
+/** Boolean env (`1/true/yes` on, `0/false/no` off) with fallback. */
+function envBool(name: string, fallback: boolean): boolean {
+  const raw = trimmed(name).toLowerCase()
+  if (!raw) return fallback
+  if (['1', 'true', 'yes', 'on'].includes(raw)) return true
+  if (['0', 'false', 'no', 'off'].includes(raw)) return false
+  return fallback
+}
+
+/**
+ * Parses the standard OTLP header list format: `key=value,key2=value2`
+ * (values percent-encoded per the OTel spec). Never logged.
+ */
+function parseOtlpHeaders(raw: string): Record<string, string> {
+  const headers: Record<string, string> = {}
+  for (const pair of raw.split(',')) {
+    const idx = pair.indexOf('=')
+    if (idx <= 0) continue
+    const key = pair.slice(0, idx).trim()
+    const value = pair.slice(idx + 1).trim()
+    if (!key) continue
+    try {
+      headers[key] = decodeURIComponent(value)
+    } catch {
+      headers[key] = value
+    }
+  }
+  return headers
+}
+
+/* --------------------------- Telemetry config ----------------------------- */
+// Everything is optional and env-driven. Defaults: local telemetry ON (the
+// dashboard's own System/Observability pages read it), OTLP export OFF until
+// an endpoint is configured. No telemetry setting can fail API startup.
+const otlpTracesEndpoint = trimmed('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT')
+const otlpBaseEndpoint = trimmed('OTEL_EXPORTER_OTLP_ENDPOINT')
+const otlpHeadersRaw = trimmed('OTEL_EXPORTER_OTLP_TRACES_HEADERS') || trimmed('OTEL_EXPORTER_OTLP_HEADERS')
+
 // Rayern pull-sync: the dashboard OUTBOUND-polls the Rayern API. Rayern never
 // calls the dashboard and never depends on it. The exact endpoint URL is
 // configured (not invented) — when unset, synchronization stays disabled.
@@ -70,6 +115,49 @@ export const config = {
   /** Dev/test only: validate + record emails without calling Resend. */
   emailDryRun: (process.env.EMAIL_DRY_RUN ?? '') === '1',
 
+  /* -------------------------- Telemetry (OpenTelemetry) -------------------- */
+  telemetry: {
+    /** Master switch for the dashboard's own telemetry pipeline. The standard
+     * OTEL_SDK_DISABLED=true also disables it. Disabled = zero telemetry work;
+     * the API runs exactly as before and unavailable values are reported as null. */
+    enabled: envBool('TELEMETRY_ENABLED', true) && !envBool('OTEL_SDK_DISABLED', false),
+    /** OTLP/HTTP traces endpoint. '' = no external export (local telemetry only). */
+    otlpEndpoint:
+      otlpTracesEndpoint ||
+      (otlpBaseEndpoint ? `${otlpBaseEndpoint.replace(/\/$/, '')}/v1/traces` : ''),
+    /** Standard OTLP auth headers (e.g. `api-key=...`). Kept out of all logs. */
+    otlpHeaders: parseOtlpHeaders(otlpHeadersRaw),
+    /** Standard OTel service identity. Sampler is read from OTEL_TRACES_SAMPLER /
+     * OTEL_TRACES_SAMPLER_ARG by the SDK itself and only affects OTLP export. */
+    serviceName: trimmed('OTEL_SERVICE_NAME') || 'rayern-admin-dashboard-api',
+    environment: trimmed('TELEMETRY_ENVIRONMENT') || process.env.NODE_ENV || 'development',
+    /** Requests slower than this count as slow (HTTP span + metrics). */
+    slowRequestMs: envNumber('TELEMETRY_SLOW_REQUEST_MS', 1_000, 1, 600_000),
+    /** Queries slower than this count as slow. */
+    slowQueryMs: envNumber('TELEMETRY_SLOW_QUERY_MS', 250, 1, 600_000),
+    /** How often buffered telemetry is persisted to the dashboard database. */
+    flushMs: envNumber('TELEMETRY_FLUSH_MS', 10_000, 1_000, 300_000),
+    /** Retention pruning so telemetry tables stay bounded. */
+    traceRetentionHours: envNumber('TELEMETRY_TRACE_RETENTION_HOURS', 48, 1, 8_760),
+    requestLogRetentionHours: envNumber('TELEMETRY_REQUEST_LOG_RETENTION_HOURS', 168, 1, 8_760),
+    spanMetricsRetentionHours: envNumber('TELEMETRY_SPAN_METRICS_RETENTION_HOURS', 168, 1, 8_760),
+  },
+
+  /* --------------------- Deterministic health thresholds ------------------- */
+  health: {
+    /** Samples required before latency/availability metrics are reported at all
+     * (below this they are null — never a fake 0). */
+    minSamples: envNumber('HEALTH_MIN_SAMPLES', 10, 1, 1_000_000),
+    errorRateDegradedPct: envNumber('HEALTH_ERROR_RATE_DEGRADED_PCT', 1, 0, 100),
+    errorRateFailingPct: envNumber('HEALTH_ERROR_RATE_FAILING_PCT', 5, 0, 100),
+    latencyP95DegradedMs: envNumber('HEALTH_LATENCY_P95_DEGRADED_MS', 500, 1, 3_600_000),
+    latencyP95FailingMs: envNumber('HEALTH_LATENCY_P95_FAILING_MS', 2_000, 1, 3_600_000),
+    availabilityDegradedPct: envNumber('HEALTH_AVAILABILITY_DEGRADED_PCT', 99, 0, 100),
+    availabilityFailingPct: envNumber('HEALTH_AVAILABILITY_FAILING_PCT', 95, 0, 100),
+    dbErrorRateDegradedPct: envNumber('HEALTH_DB_ERROR_RATE_DEGRADED_PCT', 1, 0, 100),
+    dbErrorRateFailingPct: envNumber('HEALTH_DB_ERROR_RATE_FAILING_PCT', 10, 0, 100),
+  },
+
   /* ------------------------- Rayern pull-sync config ------------------------ */
   rayern: {
     /** Optional base URL, e.g. https://api.rayern.com — RAYERN_SYNC_ENDPOINT wins if set. */
@@ -78,10 +166,11 @@ export const config = {
     syncEndpoint: rayernSyncEndpoint || (rayernApiBaseUrl ? `${rayernApiBaseUrl.replace(/\/$/, '')}/internal/dashboard-metrics` : ''),
     /** Bearer token sent to Rayern. Lives only on this server; never in the browser. */
     monitoringToken: trimmed('RAYERN_MONITORING_TOKEN'),
-    /** How often the dashboard pulls from Rayern (ms). Default 10 minutes;
+    /** How often the dashboard pulls from Rayern (ms). Default 30 minutes
+     * (1800000 — long enough to stay clear of Rayern's rate limits);
      * overridable via RAYERN_SYNC_INTERVAL_MS, clamped to a 30s floor so a
      * misconfiguration can never turn the worker into an aggressive retry loop. */
-    intervalMs: Math.max(Number(process.env.RAYERN_SYNC_INTERVAL_MS ?? 600_000), 30_000),
+    intervalMs: Math.max(Number(process.env.RAYERN_SYNC_INTERVAL_MS ?? 1_800_000), 30_000),
     /** Per-request timeout (ms) — a hanging Rayern must never hang the worker. */
     timeoutMs: Math.min(Math.max(Number(process.env.RAYERN_SYNC_TIMEOUT_MS ?? 15_000), 2_000), 120_000),
   },

@@ -150,6 +150,7 @@ export async function initDb(): Promise<void> {
       bcc_addrs   TEXT[] NOT NULL DEFAULT '{}',
       subject     TEXT NOT NULL,
       body        TEXT NOT NULL DEFAULT '',
+      body_type   TEXT NOT NULL DEFAULT 'text',
       type        TEXT NOT NULL DEFAULT 'update'
                   CHECK (type IN ('update','announcement','promotion','notice')),
       status      TEXT NOT NULL DEFAULT 'sent'
@@ -160,6 +161,9 @@ export async function initDb(): Promise<void> {
 
   // Migration for pre-existing installs created before the body column existed.
   await query(`ALTER TABLE emails ADD COLUMN IF NOT EXISTS body TEXT NOT NULL DEFAULT ''`)
+  // Migration: explicit composer body mode ('text' | 'html') so history and
+  // "copy as new" preserve how the message was sent.
+  await query(`ALTER TABLE emails ADD COLUMN IF NOT EXISTS body_type TEXT NOT NULL DEFAULT 'text'`)
 
   await query(`
     CREATE TABLE IF NOT EXISTS rayern_sync_state (

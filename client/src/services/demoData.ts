@@ -204,6 +204,7 @@ export function buildEmails(): EmailMessage[] {
       cc: Array.from({ length: ccCount }, () => makeEmail(pick(FIRST), i + 400)),
       bcc: Array.from({ length: bccCount }, () => makeEmail(pick(FIRST), i + 500)),
       subject: pick(EMAIL_SUBJECTS[type]),
+      bodyType: chance(0.35) ? 'html' : 'text',
       type,
       status: status as EmailMessage['status'],
       sentAt: minutesAgo(randInt(3, 60 * 24 * 30)),
@@ -235,7 +236,13 @@ export function buildEmailStats(emails: EmailMessage[]): EmailStats {
   }
 }
 
-export function buildSentEmail(payload: { subject: string; to: string[]; cc: string[]; bcc: string[] }): EmailMessage {
+export function buildSentEmail(payload: {
+  subject: string
+  to: string[]
+  cc: string[]
+  bcc: string[]
+  bodyType?: EmailMessage['bodyType']
+}): EmailMessage {
   return {
     id: `eml_${Date.now()}`,
     resendId: `re_demo${Date.now().toString(36)}`,
@@ -243,6 +250,7 @@ export function buildSentEmail(payload: { subject: string; to: string[]; cc: str
     cc: payload.cc,
     bcc: payload.bcc,
     subject: payload.subject,
+    bodyType: payload.bodyType ?? 'text',
     type: 'announcement',
     status: 'queued',
     sentAt: new Date().toISOString(),

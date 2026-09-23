@@ -110,6 +110,13 @@ export type EmailStatus = 'sent' | 'delivered' | 'failed' | 'bounced' | 'queued'
  */
 export type EmailType = 'update' | 'announcement' | 'promotion' | 'notice'
 
+/**
+ * Explicit composer body mode. Chosen by the admin, sent through the matching
+ * provider field (html → `html`, text → `text`), persisted with the history
+ * record, and preserved by "copy as new". Never inferred from content.
+ */
+export type EmailBodyType = 'html' | 'text'
+
 export interface EmailMessage {
   id: ID
   resendId: string
@@ -117,6 +124,7 @@ export interface EmailMessage {
   cc: string[]
   bcc: string[]
   subject: string
+  bodyType: EmailBodyType
   type: EmailType
   status: EmailStatus
   sentAt: string
@@ -138,6 +146,8 @@ export interface ComposeEmailPayload {
   bcc: string[]
   subject: string
   message: string
+  /** How the body must be sent: 'text' → text field, 'html' → html field. */
+  bodyType: EmailBodyType
 }
 
 /* --------------------------------- System --------------------------------- */
@@ -149,24 +159,28 @@ export interface ServiceHealth {
   name: string
   kind: 'api' | 'database' | 'cache' | 'queue' | 'email' | 'storage'
   status: HealthStatus
-  uptimePct30d: number
-  latencyMsP50: number
-  latencyMsP95: number
+  /** Observed availability (%). null = insufficient telemetry — never faked. */
+  uptimePct30d: number | null
+  /** null = not yet measured (insufficient telemetry). */
+  latencyMsP50: number | null
+  latencyMsP95: number | null
   lastIncidentAt: string | null
 }
 
 export interface LatencyPercentiles {
-  p50: number
-  p90: number
-  p95: number
-  p99: number
+  /** null = no measured requests in the window (rendered as "—", never 0). */
+  p50: number | null
+  p90: number | null
+  p95: number | null
+  p99: number | null
 }
 
 export interface SystemOverview {
   overall: HealthStatus
   services: ServiceHealth[]
   requestVolume: Array<{ time: string; count: number; errors: number }>
-  errorRatePct: number
+  /** null = no requests measured in the window (rendered as "—", never 0). */
+  errorRatePct: number | null
   requestCount24h: number
   latency: LatencyPercentiles
   recentFailures: RecentFailure[]

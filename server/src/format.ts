@@ -27,6 +27,8 @@ export interface EmailRow {
   cc_addrs: string[]
   bcc_addrs: string[]
   subject: string
+  /** Composer body mode ('text' | 'html'); rows predating it read as 'text'. */
+  body_type?: string | null
   type: string
   status: string
   sent_at: Date
@@ -82,6 +84,7 @@ export function toEmailMessage(row: EmailRow) {
     cc: row.cc_addrs,
     bcc: row.bcc_addrs,
     subject: row.subject,
+    bodyType: row.body_type === 'html' ? ('html' as const) : ('text' as const),
     type: row.type as EmailType,
     status: row.status as EmailStatus,
     sentAt: iso(row.sent_at),

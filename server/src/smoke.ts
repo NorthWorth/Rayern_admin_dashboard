@@ -16,7 +16,13 @@
  *         recovery; nullable untracked metrics (deletedAccounts30d: null) and
  *         the 'starter' plan tier accepted by the contract
  *   - emails: validation, server-enforced From, cross-field dedup, dry-run,
- *     history without bodies, copy-body endpoint, audience endpoint
+ *     history without bodies, copy-body endpoint, audience endpoint,
+ *     the full To/CC/BCC recipient-combination matrix (send allowed when ANY
+ *     field is non-empty; all-empty rejected), BCC-only payload integrity
+ *     (empty `to`, no fabricated recipient), Plain Text/HTML bodyMode flow
+ *     (right Resend field, sanitized stored HTML, mode preserved by
+ *     copy-as-new), compact audit metadata (counts, never address lists),
+ *     and the sync startup log / 30-minute default interval
  *   - the old push endpoint /sync/rayern is gone
  *
  * Usage: bun run src/smoke.ts
@@ -236,6 +242,9 @@ async function main(): Promise<void> {
   const rayern = await startMockRayern()
   console.log('Starting dashboard API for smoke test…')
 
+  /** Buffered API output — used to verify the sync startup log format. */
+  const apiLog = { text: '' }
+
   const bootApi = (): ChildProcess => {
     // Use the same tsx-under-bun invocation the preview/dev scripts use —
     // spawning `bun run` recursively is unreliable in constrained sandboxes.
@@ -244,8 +253,14 @@ async function main(): Promise<void> {
       env: CHILD_ENV,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
-    child.stdout.on('data', (d) => process.stdout.write(`  [api] ${d}`))
-    child.stderr.on('data', (d) => process.stderr.write(`  [api] ${d}`))
+    child.stdout.on('data', (d) => {
+      apiLog.text += String(d)
+      process.stdout.write(`  [api] ${d}`)
+    })
+    child.stderr.on('data', (d) => {
+      apiLog.text += String(d)
+      process.stderr.write(`  [api] ${d}`)
+    })
     child.on('error', (e) => console.error('  [api spawn-error]', e.message))
     return child
   }
@@ -609,7 +624,15 @@ async function main(): Promise<void> {
       { from: 'Rayern <support@rayern.com.ng>', to: [], subject: 'x', message: 'y' },
       token,
     )
-    check('POST /emails/send with empty To → 400', noTo.status === 400)
+    check('POST /emails/send with all three fields empty → 400', noTo.status === 400)
+
+    const noRecipientsAtAll = await req(
+      'POST',
+      '/emails/send',
+      { from: 'Rayern <support@rayern.com.ng>', to: [], cc: [], bcc: [], subject: 'x', message: 'y' },
+      token,
+    )
+    check('POST /emails/send with explicit empty To+CC+BCC → 400', noRecipientsAtAll.status === 400)
 
     const send = await req(
       'POST',
@@ -647,6 +670,133 @@ async function main(): Promise<void> {
     const audience = await req('GET', '/emails/audience', undefined, token)
     check('GET /emails/audience → 200', audience.status === 200 && Array.isArray((audience.json as { recipients?: unknown[] })?.recipients))
 
+    console.log('\n— emails: recipient combination matrix (send iff To/CC/BCC any non-empty) —')
+    const comboBase = { from: 'Rayern <support@rayern.com.ng>', subject: 'Combo matrix', message: 'Hello' }
+    const combos: Array<{ name: string; body: Record<string, unknown>; expect: number }> = [
+      { name: 'To only → SEND', body: { to: ['to-only@example.com'] }, expect: 201 },
+      { name: 'CC only → SEND', body: { to: [], cc: ['cc-only@example.com'] }, expect: 201 },
+      { name: 'BCC only → SEND', body: { to: [], bcc: ['bcc-only@example.com'] }, expect: 201 },
+      { name: 'To + CC → SEND', body: { to: ['a@example.com'], cc: ['c@example.com'] }, expect: 201 },
+      { name: 'To + BCC → SEND', body: { to: ['a@example.com'], bcc: ['d@example.com'] }, expect: 201 },
+      { name: 'CC + BCC → SEND', body: { to: [], cc: ['c@example.com'], bcc: ['d@example.com'] }, expect: 201 },
+      { name: 'To + CC + BCC → SEND', body: { to: ['a@example.com'], cc: ['c@example.com'], bcc: ['d@example.com'] }, expect: 201 },
+      { name: 'all three empty → REJECT', body: { to: [], cc: [], bcc: [] }, expect: 400 },
+    ]
+    for (const combo of combos) {
+      const res = await req('POST', '/emails/send', { ...comboBase, ...combo.body }, token)
+      check(combo.name, res.status === combo.expect, `status=${res.status}`)
+    }
+
+    // Visibility integrity: CC-only/BCC-only responses must not invent a To.
+    const ccOnly = (await req('POST', '/emails/send', { ...comboBase, to: [], cc: ['cc-visibility@example.com'] }, token)).json as {
+      to?: string[]
+      cc?: string[]
+      bcc?: string[]
+    }
+    check('CC-only send: no To address injected', Array.isArray(ccOnly.to) && ccOnly.to.length === 0)
+    check('CC-only send: CC preserved', ccOnly.cc?.includes('cc-visibility@example.com') === true)
+    const bccOnly = (await req('POST', '/emails/send', { ...comboBase, to: [], bcc: ['bcc-visibility@example.com'] }, token)).json as {
+      to?: string[]
+      cc?: string[]
+      bcc?: string[]
+    }
+    check('BCC-only send: no To address injected (stays genuinely BCC)', Array.isArray(bccOnly.to) && bccOnly.to.length === 0)
+    check('BCC-only send: no CC side-channel', Array.isArray(bccOnly.cc) && bccOnly.cc.length === 0)
+    check('BCC-only send: BCC preserved', bccOnly.bcc?.includes('bcc-visibility@example.com') === true)
+
+    console.log('\n— emails: exact Resend payload per recipient/body combination —')
+    const { buildResendPayload, sanitizeEmailHtml, wrapHtmlFragment } = await import('./emailer')
+    const identity = 'Rayern <support@rayern.com.ng>'
+    const pBccOnly = buildResendPayload(
+      { to: [], cc: [], bcc: ['hidden@example.com'], subject: 's', html: '<p>x</p>' },
+      identity,
+    )
+    check('BCC-only payload: `to` present but empty (field required by SDK, no fake recipient)',
+      Array.isArray(pBccOnly.to) && (pBccOnly.to as string[]).length === 0)
+    check('BCC-only payload: cc omitted entirely', !('cc' in pBccOnly))
+    check('BCC-only payload: bcc preserved', JSON.stringify(pBccOnly.bcc) === '["hidden@example.com"]')
+    check('BCC-only payload: html mode → html field only', 'html' in pBccOnly && !('text' in pBccOnly))
+    const pCcOnly = buildResendPayload({ to: [], cc: ['visible@example.com'], bcc: [], subject: 's', text: 'hi' }, identity)
+    check('CC-only payload: to empty, cc kept, text field only',
+      Array.isArray(pCcOnly.to) && (pCcOnly.to as string[]).length === 0 &&
+      JSON.stringify(pCcOnly.cc) === '["visible@example.com"]' && 'text' in pCcOnly && !('html' in pCcOnly))
+    check('full JSON payload contains no fabricated address for BCC-only',
+      !/example\.com[^\]]*example\.com/.test(JSON.stringify({ to: pBccOnly.to })) && (pBccOnly.to as string[]).length === 0)
+    const sanitized = sanitizeEmailHtml('<p>Keep</p><script>alert(1)</script><img src=x onerror=alert(1)><a href="javascript:alert(1)">x</a><iframe src="https://evil"></iframe>')
+    check('HTML sanitizer strips script/handlers/js-URL/iframe, keeps formatting',
+      !/<script/i.test(sanitized) && !/onerror/i.test(sanitized) && !/javascript:/i.test(sanitized) &&
+      !/<iframe/i.test(sanitized) && sanitized.includes('<p>Keep</p>'))
+    check('HTML fragments wrapped into a document (no user boilerplate)',
+      wrapHtmlFragment('<p>Hi</p>').startsWith('<!doctype html>') && wrapHtmlFragment('<!doctype html><html><body>x</body></html>') === '<!doctype html><html><body>x</body></html>')
+
+    console.log('\n— emails: Plain Text / HTML bodyMode end-to-end —')
+    const htmlSend = await req(
+      'POST',
+      '/emails/send',
+      {
+        to: ['html-mode@example.com'],
+        subject: 'HTML mode test',
+        message: '<p>Hello world</p><script>alert(1)</script><img src="x" onerror="alert(1)">',
+        bodyType: 'html',
+      },
+      token,
+    )
+    check('html-mode send → 201 with bodyType=html', htmlSend.status === 201 && (htmlSend.json as { bodyType?: string }).bodyType === 'html')
+    const history2 = (await req('GET', '/emails', undefined, token)).json as Array<{
+      id?: string
+      subject?: string
+      bodyType?: string
+      message?: string
+      body?: string
+    }>
+    const htmlRow = history2.find((e) => e.subject === 'HTML mode test')
+    check('history row records bodyType=html', htmlRow?.bodyType === 'html')
+    check('history rows never expose the body', history2.every((e) => !('message' in e) && !('body' in e)))
+    const htmlCopy = (await req('GET', `/emails/${htmlRow?.id ?? '00000000-0000-4000-8000-000000000000'}/body`, undefined, token)).json as {
+      message?: string
+      bodyType?: string
+    }
+    check('copy-as-new preserves HTML mode (never auto-sends)', htmlCopy.bodyType === 'html')
+    check('stored HTML sanitized but formatting preserved',
+      !!htmlCopy.message && htmlCopy.message.includes('<p>Hello world</p>') &&
+      !/<script/i.test(htmlCopy.message) && !/onerror/i.test(htmlCopy.message))
+
+    const textSend = await req(
+      'POST',
+      '/emails/send',
+      { to: ['plain-mode@example.com'], subject: 'Plain mode test', message: '<p>literal tags</p>', bodyType: 'text' },
+      token,
+    )
+    check('text-mode send → 201 with bodyType=text', textSend.status === 201 && (textSend.json as { bodyType?: string }).bodyType === 'text')
+    const defaultSend = await req(
+      'POST',
+      '/emails/send',
+      { to: ['default-mode@example.com'], subject: 'Default mode test', message: 'plain body' },
+      token,
+    )
+    check('bodyType omitted → defaults to text', defaultSend.status === 201 && (defaultSend.json as { bodyType?: string }).bodyType === 'text')
+    const history3 = (await req('GET', '/emails', undefined, token)).json as Array<{
+      id?: string
+      subject?: string
+      bodyType?: string
+    }>
+    check('history records text mode rows as bodyType=text',
+      history3.find((e) => e.subject === 'Plain mode test')?.bodyType === 'text' &&
+      history3.find((e) => e.subject === 'Default mode test')?.bodyType === 'text')
+    const textRow = history3.find((e) => e.subject === 'Default mode test')
+    const textCopy = (await req('GET', `/emails/${textRow?.id ?? '00000000-0000-4000-8000-000000000000'}/body`, undefined, token)).json as {
+      message?: string
+      bodyType?: string
+    }
+    check('copy-as-new preserves Plain Text mode', textCopy.bodyType === 'text' && textCopy.message === 'plain body')
+    const badBodyType = await req(
+      'POST',
+      '/emails/send',
+      { to: ['x@example.com'], subject: 'Bad mode', message: 'x', bodyType: 'markdown' },
+      token,
+    )
+    check('unknown bodyType rejected → 400', badBodyType.status === 400)
+
     console.log('\n— audit trail —')
     const auditAfter = await req('GET', '/audit', undefined, token)
     const events = auditAfter.json as Array<{ action?: string }>
@@ -654,6 +804,37 @@ async function main(): Promise<void> {
     check('audit contains email.sent', events.some((e) => e.action === 'email.sent'))
     check('audit contains sync.completed', events.some((e) => e.action === 'sync.completed'))
     check('audit contains sync.failed', events.some((e) => e.action === 'sync.failed'))
+
+    const emailEvents = (events as Array<{ action?: string; metadata?: Record<string, string> }>)
+      .filter((e) => e.action === 'email.sent')
+    check('audit email.sent events found', emailEvents.length > 0)
+    check(
+      'audit email.sent metadata stores recipient COUNTS (compact rows)',
+      emailEvents.every((e) => 'toCount' in (e.metadata ?? {}) && 'ccCount' in (e.metadata ?? {}) && 'bccCount' in (e.metadata ?? {})),
+    )
+    check(
+      'audit email.sent metadata never contains recipient addresses (incl. bulk sends)',
+      emailEvents.every((e) => !JSON.stringify(e.metadata ?? {}).includes('@example.com')),
+    )
+
+    console.log('\n— sync schedule: startup log + 30-minute default —')
+    // CHILD_ENV sets RAYERN_SYNC_INTERVAL_MS=4000, which the config's safety
+    // floor clamps to 30s — the log must report the ACTUAL schedule (30s),
+    // never a stale 600000/600s value.
+    check(
+      'startup log reports the configured pull interval',
+      apiLog.text.includes('pull-sync enabled') && apiLog.text.includes('every 30s'),
+      `enabled=${apiLog.text.includes('pull-sync enabled')} every30s=${apiLog.text.includes('every 30s')}`,
+    )
+    check('startup log has no stale 600000/600s output', !apiLog.text.includes('600000') && !apiLog.text.includes('600s'))
+    const { formatIntervalMs } = await import('./rayernSync')
+    check('interval formatter renders the 30-minute default as 30m', formatIntervalMs(1_800_000) === '30m')
+    if (!process.env.RAYERN_SYNC_INTERVAL_MS) {
+      const { config } = await import('./config')
+      check('default RAYERN sync interval is 1800000 ms (30 minutes)', config.rayern.intervalMs === 1_800_000, `got=${config.rayern.intervalMs}`)
+    } else {
+      check('default RAYERN sync interval check skipped (RAYERN_SYNC_INTERVAL_MS overridden in env)', true)
+    }
 
     console.log('\n— old push endpoint removed —')
     const oldSync = await req('POST', '/sync/rayern', { accounts: { totalAccounts: 1 } })

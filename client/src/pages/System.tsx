@@ -24,8 +24,20 @@ export function SystemPage() {
           tone={q.data?.overall === 'healthy' ? 'green' : q.data?.overall === 'degraded' ? 'amber' : 'red'}
         />
         <KpiCard label="Requests (24h)" value={q.data ? formatCompact(q.data.requestCount24h) : '—'} />
-        <KpiCard label="Error rate" value={q.data ? formatPct(q.data.errorRatePct, 2) : '—'} tone={q.data && q.data.errorRatePct > 1 ? 'red' : 'default'} />
-        <KpiCard label="Latency p95" value={q.data ? `${q.data.latency.p95}ms` : '—'} sub={q.data ? `p50 ${q.data.latency.p50}ms · p99 ${q.data.latency.p99}ms` : undefined} />
+        <KpiCard
+          label="Error rate"
+          value={q.data ? (q.data.errorRatePct === null ? '—' : formatPct(q.data.errorRatePct, 2)) : '—'}
+          tone={q.data && q.data.errorRatePct !== null && q.data.errorRatePct > 1 ? 'red' : 'default'}
+        />
+        <KpiCard
+          label="Latency p95"
+          value={q.data ? (q.data.latency.p95 === null ? '—' : `${q.data.latency.p95}ms`) : '—'}
+          sub={
+            q.data && q.data.latency.p50 !== null && q.data.latency.p99 !== null
+              ? `p50 ${q.data.latency.p50}ms · p99 ${q.data.latency.p99}ms`
+              : undefined
+          }
+        />
       </div>
 
       <SyncStatusCard sync={q.data?.sync} loading={q.loading} error={q.error} onRetry={q.refetch} />
@@ -56,14 +68,15 @@ export function SystemPage() {
           <CardBody className="space-y-3">
             {q.data ? (
               (['p50', 'p90', 'p95', 'p99'] as const).map((k) => {
-                const value = q.data?.latency[k] ?? 0
+                // null = no measured requests — show "—" instead of a fake 0ms bar.
+                const value = q.data?.latency[k] ?? null
                 const max = 500
-                const width = Math.min(100, (value / max) * 100)
+                const width = value === null ? 0 : Math.min(100, (value / max) * 100)
                 return (
                   <div key={k}>
                     <div className="flex items-baseline justify-between text-xs">
                       <span className="font-medium uppercase text-ink-600">{k}</span>
-                      <span className="font-semibold text-ink-900">{value}ms</span>
+                      <span className="font-semibold text-ink-900">{value === null ? '—' : `${value}ms`}</span>
                     </div>
                     <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-ink-100">
                       <div className={`h-full rounded-full ${k === 'p99' ? 'bg-amber-500' : 'bg-emerald-600'}`} style={{ width: `${width}%` }} />
@@ -104,9 +117,15 @@ export function SystemPage() {
                     <td className="px-4 py-2.5 font-medium text-ink-900">{s.name}</td>
                     <td className="px-3 py-2.5 text-ink-600">{titleCase(s.kind)}</td>
                     <td className="px-3 py-2.5"><StatusBadge tone={tone(s.status)}>{titleCase(s.status)}</StatusBadge></td>
-                    <td className="px-3 py-2.5 text-right text-ink-700">{formatPct(s.uptimePct30d, 2)}</td>
-                    <td className="px-3 py-2.5 text-right text-ink-700">{s.latencyMsP50}ms</td>
-                    <td className="px-3 py-2.5 text-right text-ink-700">{s.latencyMsP95}ms</td>
+                    <td className="px-3 py-2.5 text-right text-ink-700">
+                      {s.uptimePct30d === null ? <span className="text-ink-400">—</span> : formatPct(s.uptimePct30d, 2)}
+                    </td>
+                    <td className="px-3 py-2.5 text-right text-ink-700">
+                      {s.latencyMsP50 === null ? <span className="text-ink-400">—</span> : `${s.latencyMsP50}ms`}
+                    </td>
+                    <td className="px-3 py-2.5 text-right text-ink-700">
+                      {s.latencyMsP95 === null ? <span className="text-ink-400">—</span> : `${s.latencyMsP95}ms`}
+                    </td>
                     <td className="px-3 py-2.5 text-ink-600">{s.lastIncidentAt ? timeAgo(s.lastIncidentAt) : <span className="text-ink-400">None on record</span>}</td>
                   </tr>
                 ))}

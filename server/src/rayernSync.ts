@@ -21,9 +21,11 @@
  *    delete previously synchronized data.
  */
 import { z } from 'zod'
+import { SpanKind } from '@opentelemetry/api'
 import { config, rayernSyncEnabled } from './config'
 import { query } from './db'
 import { recordAudit } from './audit'
+import { withSpan } from './telemetry'
 
 /* ----------------------- Approved aggregate contracts ---------------------- */
 /* These schemas are the privacy contract with Rayern. Zod strips every field
@@ -328,18 +330,37 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
     const timer = setTimeout(() => controller.abort(), config.rayern.timeoutMs)
     let res: Response
     try {
-      res = await fetch(config.rayern.syncEndpoint, {
-        method: 'GET',
-        headers: {
-          Accept: 'application/json',
-          // The monitoring token lives only on this server and is never sent
-          // anywhere else — most importantly never to the browser.
-          ...(config.rayern.monitoringToken
-            ? { Authorization: `Bearer ${config.rayern.monitoringToken}` }
-            : {}),
+      // External HTTP CLIENT span, parented to the rayern.sync span. Only the
+      // endpoint host + pathname are recorded — never the monitoring token,
+      // headers, query strings, or the response body.
+      res = await withSpan(
+        {
+          name: 'rayern.fetch',
+          kind: SpanKind.CLIENT,
+          service: 'rayern-sync',
+          operation: 'rayern.fetch',
+          attributes: {
+            'server.address': syncEndpointHost(),
+            'url.path': syncEndpointPath(),
+            'http.request.method': 'GET',
+          },
+          statusFrom: (value) => (value as Response).status,
+          okFrom: (value) => (value as Response).ok,
         },
-        signal: controller.signal,
-      })
+        async () =>
+          fetch(config.rayern.syncEndpoint, {
+            method: 'GET',
+            headers: {
+              Accept: 'application/json',
+              // The monitoring token lives only on this server and is never sent
+              // anywhere else — most importantly never to the browser.
+              ...(config.rayern.monitoringToken
+                ? { Authorization: `Bearer ${config.rayern.monitoringToken}` }
+                : {}),
+            },
+            signal: controller.signal,
+          }),
+      )
     } finally {
       clearTimeout(timer)
     }
@@ -433,6 +454,36 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
   }
 }
 
+/** Host of the configured sync endpoint — safe to export in telemetry. */
+function syncEndpointHost(): string {
+  try {
+    return new URL(config.rayern.syncEndpoint).host
+  } catch {
+    return 'rayern'
+  }
+}
+
+/** Pathname only (never a query string) of the configured sync endpoint. */
+function syncEndpointPath(): string {
+  try {
+    return new URL(config.rayern.syncEndpoint).pathname
+  } catch {
+    return '/internal/dashboard-metrics'
+  }
+}
+
+/**
+ * Human-readable interval for the startup log, derived from the ACTUAL
+ * configured value so the log can never disagree with the schedule:
+ *   1_800_000 → "30m" · 600_000 → "10m" · 4_000 → "4s"
+ */
+export function formatIntervalMs(ms: number): string {
+  const minutes = ms / 60_000
+  if (Number.isInteger(minutes) && minutes >= 1) return `${minutes}m`
+  const seconds = Math.round(ms / 1000)
+  return seconds >= 60 ? `${Math.round(minutes)}m` : `${seconds}s`
+}
+
 /** Starts the background pull loop. No-op when sync is not configured. */
 export function startSyncWorker(): void {
   if (!rayernSyncEnabled()) {
@@ -440,13 +491,33 @@ export function startSyncWorker(): void {
     return
   }
   console.log(
-    `[dashboard-sync] pull-sync enabled → GET ${config.rayern.syncEndpoint} every ${Math.round(config.rayern.intervalMs / 1000)}s`,
+    `[dashboard-sync] pull-sync enabled → GET ${config.rayern.syncEndpoint} every ${formatIntervalMs(config.rayern.intervalMs)}`,
   )
   // First run shortly after boot so the dashboard has data quickly, then on
   // the configured interval. syncOnce guards overlap, so a slow boot run and a
   // scheduled tick can never double-run.
-  setTimeout(() => void syncOnce('boot'), 5_000).unref()
-  setInterval(() => void syncOnce('scheduled'), config.rayern.intervalMs).unref()
+  // Each pull attempt runs inside an INTERNAL OpenTelemetry span so the
+  // outbound fetch below is a proper child span. Skipped pulls (rate-limit,
+  // overlap) are recorded as non-error outcomes; a failed pull marks the span
+  // as an error — the failure-recording behavior of syncOnce is unchanged.
+  const tracedSync = (trigger: 'boot' | 'scheduled'): Promise<SyncResult> =>
+    withSpan(
+      {
+        name: 'rayern.sync',
+        kind: SpanKind.INTERNAL,
+        service: 'rayern-sync',
+        operation: 'rayern.sync',
+        attributes: { 'rayern.trigger': trigger },
+        statusFrom: () => 0,
+        okFrom: (value) => {
+          const result = value as SyncResult
+          return result.ok || result.skipped !== undefined
+        },
+      },
+      () => syncOnce(trigger),
+    )
+  setTimeout(() => void tracedSync('boot'), 5_000).unref()
+  setInterval(() => void tracedSync('scheduled'), config.rayern.intervalMs).unref()
 }
 
 /** Shape returned by the /system overview for the sync-status card. */

@@ -9,10 +9,21 @@
 import { Router } from 'express'
 import { pool } from '../db'
 import { getSyncStatus } from '../rayernSync'
+import { computeApiHealth, computeDbHealth, runtimeSnapshot } from '../telemetry'
 
 const router = Router()
 
-const startedAt = Date.now()
+/** Service row as served to the UI — null = insufficient telemetry (never faked). */
+interface ServiceRowView {
+  id: string
+  name: string
+  kind: 'api' | 'database' | 'cache' | 'queue' | 'email' | 'storage'
+  status: 'healthy' | 'degraded' | 'failing'
+  uptimePct30d: number | null
+  latencyMsP50: number | null
+  latencyMsP95: number | null
+  lastIncidentAt: string | null
+}
 
 router.get('/overview', async (_req, res, next) => {
   try {
@@ -21,8 +32,7 @@ router.get('/overview', async (_req, res, next) => {
     await pool.query('SELECT 1')
     const dbLatencyMs = Date.now() - dbStart
 
-    const mem = process.memoryUsage()
-    const uptimeSec = Math.floor((Date.now() - startedAt) / 1000)
+    const runtime = runtimeSnapshot()
 
     const serviceRows = await pool.query<{
       service: string
@@ -37,29 +47,48 @@ router.get('/overview', async (_req, res, next) => {
        FROM service_health ORDER BY service`,
     )
 
-    const services = serviceRows.rows.map((r) => ({
+    // Rows synced from Rayern keep Rayern's reported values. The dashboard's
+    // OWN rows are synthesized from real in-process telemetry: availability /
+    // latency are null until the rolling window has enough samples — never a
+    // fake 100% uptime or 0ms latency.
+    const apiHealth = computeApiHealth()
+    const dbHealth = computeDbHealth()
+
+    const services: ServiceRowView[] = serviceRows.rows.map((r) => ({
       id: `${r.kind}:${r.service}`,
       name: r.service,
-      kind: r.kind as 'api' | 'database' | 'cache' | 'queue' | 'email' | 'storage',
-      status: r.status as 'healthy' | 'degraded' | 'failing',
+      kind: r.kind as ServiceRowView['kind'],
+      status: r.status as ServiceRowView['status'],
       uptimePct30d: Number(r.uptime_pct_30d),
       latencyMsP50: Number(r.latency_p50),
       latencyMsP95: Number(r.latency_p95),
       lastIncidentAt: r.last_incident_at ? r.last_incident_at.toISOString() : null,
     }))
 
-    // Include live self-status for the dashboard API itself.
-    const selfApi = {
+    const selfDb: ServiceRowView = {
+      id: 'database:PostgreSQL',
+      name: 'PostgreSQL',
+      kind: 'database',
+      status: dbHealth.status,
+      uptimePct30d: dbHealth.availabilityPct,
+      latencyMsP50: dbHealth.p50Ms,
+      latencyMsP95: dbHealth.p95Ms,
+      lastIncidentAt: null,
+    }
+    const selfApi: ServiceRowView = {
       id: 'api:dashboard-backend',
       name: 'Dashboard API',
-      kind: 'api' as const,
-      status: 'healthy' as const,
-      uptimePct30d: 100,
-      latencyMsP50: 0,
-      latencyMsP95: 0,
+      kind: 'api',
+      status: apiHealth.status,
+      // Observed availability over the rolling 24h window (null when there is
+      // not yet enough telemetry to measure it honestly).
+      uptimePct30d: apiHealth.availabilityPct,
+      latencyMsP50: apiHealth.p50Ms,
+      latencyMsP95: apiHealth.p95Ms,
       lastIncidentAt: null,
     }
     if (!services.some((s) => s.name === 'Dashboard API')) services.unshift(selfApi)
+    if (!services.some((s) => s.name === 'PostgreSQL')) services.unshift(selfDb)
 
     const overall =
       services.some((s) => s.status === 'failing')
@@ -105,6 +134,9 @@ router.get('/overview', async (_req, res, next) => {
 
     const total24h = Number(totalRows.rows[0]?.total ?? 0)
     const errors24h = Number(totalRows.rows[0]?.errors ?? 0)
+    // With no requests in the window there is nothing to measure — report
+    // null ("unavailable") rather than a fake 0% error rate / 0ms latency.
+    const has24hData = total24h > 0
 
     // Dashboard-side Rayern pull-sync health (spec section 12).
     const sync = await getSyncStatus()
@@ -117,13 +149,13 @@ router.get('/overview', async (_req, res, next) => {
         count: Number(r.count),
         errors: Number(r.errors),
       })),
-      errorRatePct: total24h > 0 ? Number(((errors24h / total24h) * 100).toFixed(2)) : 0,
+      errorRatePct: has24hData ? Number(((errors24h / total24h) * 100).toFixed(2)) : null,
       requestCount24h: total24h,
       latency: {
-        p50: Number(latencyRows.rows[0]?.p50 ?? 0),
-        p90: Number(latencyRows.rows[0]?.p90 ?? 0),
-        p95: Number(latencyRows.rows[0]?.p95 ?? 0),
-        p99: Number(latencyRows.rows[0]?.p99 ?? 0),
+        p50: has24hData ? Number(latencyRows.rows[0]?.p50 ?? 0) : null,
+        p90: has24hData ? Number(latencyRows.rows[0]?.p90 ?? 0) : null,
+        p95: has24hData ? Number(latencyRows.rows[0]?.p95 ?? 0) : null,
+        p99: has24hData ? Number(latencyRows.rows[0]?.p99 ?? 0) : null,
       },
       recentFailures: failureRows.rows.map((r) => ({
         id: r.id,
@@ -150,10 +182,15 @@ router.get('/overview', async (_req, res, next) => {
         running: sync.running,
       },
       meta: {
-        processUptimeSec: uptimeSec,
+        processUptimeSec: runtime.uptimeSec,
         dbLatencyMs,
-        rssBytes: mem.rss,
-        heapUsedBytes: mem.heapUsed,
+        rssBytes: runtime.rssBytes,
+        heapUsedBytes: runtime.heapUsedBytes,
+        heapTotalBytes: runtime.heapTotalBytes,
+        // Real runtime/process telemetry — null when telemetry is disabled or
+        // the runtime cannot measure it (never a fabricated 0).
+        cpuPercent: runtime.cpuPercent,
+        eventLoopDelayP95Ms: runtime.eventLoopDelayP95Ms,
       },
     })
   } catch (err) {
