@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { NavLink, Link, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { OverviewPage } from './pages/Overview'
 import { UsersPage } from './pages/Users'
@@ -95,28 +95,34 @@ const pageTitles: Record<string, { title: string; sub: string }> = {
 function DemoBanner() {
   if (!DEMO_MODE) return null
   return (
-    <div className="flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] text-amber-800">
-      <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden="true" />
-      Demo data — set <code className="rounded bg-amber-100 px-1 font-mono text-[10px]">VITE_ADMIN_API_URL</code> to connect the backend
+    <div className="flex max-w-full min-w-0 items-center gap-2 overflow-hidden rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] text-amber-800">
+      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" aria-hidden="true" />
+      <span className="truncate">Demo data — set <code className="rounded bg-amber-100 px-1 font-mono text-[10px]">VITE_ADMIN_API_URL</code> to connect the backend</span>
     </div>
   )
 }
 
-function Sidebar() {
+function SidebarBrand() {
   return (
-    <aside className="hidden w-60 shrink-0 flex-col border-r border-ink-800 bg-ink-900 text-ink-100 md:flex">
-      <div className="flex h-14 items-center gap-2.5 border-b border-ink-800 px-4">
-        <span className="flex h-7 w-7 items-center justify-center rounded-md bg-white/10">
-          <svg width="14" height="14" viewBox="0 0 32 32" aria-hidden="true">
-            <path d="M9 23V9h6.2c2.9 0 4.8 1.7 4.8 4.2 0 1.9-1.1 3.3-2.9 3.9L21 23h-3.4l-3.2-5.4h-2.2V23H9zm3.2-7.9h2.6c1.4 0 2.3-.8 2.3-2s-.9-1.9-2.3-1.9h-2.6v3.9z" fill="#f7f8f9" />
-            <circle cx="23.5" cy="9" r="2" fill="#35c08e" />
-          </svg>
-        </span>
-        <div className="leading-tight">
-          <p className="text-[13px] font-semibold text-white">Rayern Admin</p>
-          <p className="text-[10px] uppercase tracking-widest text-ink-400">Operator console</p>
-        </div>
+    <>
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white/10">
+        <svg width="14" height="14" viewBox="0 0 32 32" aria-hidden="true">
+          <path d="M9 23V9h6.2c2.9 0 4.8 1.7 4.8 4.2 0 1.9-1.1 3.3-2.9 3.9L21 23h-3.4l-3.2-5.4h-2.2V23H9zm3.2-7.9h2.6c1.4 0 2.3-.8 2.3-2s-.9-1.9-2.3-1.9h-2.6v3.9z" fill="#f7f8f9" />
+          <circle cx="23.5" cy="9" r="2" fill="#35c08e" />
+        </svg>
+      </span>
+      <div className="min-w-0 leading-tight">
+        <p className="text-[13px] font-semibold text-white">Rayern Admin</p>
+        <p className="text-[10px] uppercase tracking-widest text-ink-400">Operator console</p>
       </div>
+    </>
+  )
+}
+
+/** Nav links + footer shared by the desktop sidebar and the mobile drawer. */
+function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
+  return (
+    <>
       <nav className="flex-1 space-y-5 overflow-y-auto px-3 py-4 scrollbar-thin">
         {NAV.map((group) => (
           <div key={group.section}>
@@ -127,6 +133,7 @@ function Sidebar() {
                   <NavLink
                     to={item.to}
                     end={item.end}
+                    onClick={onNavigate}
                     className={({ isActive }) =>
                       clsx(
                         'flex items-center gap-2.5 rounded-md px-2.5 py-2 text-[13px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30',
@@ -143,19 +150,121 @@ function Sidebar() {
           </div>
         ))}
       </nav>
-      <div className="border-t border-ink-800 px-4 py-3">        <p className="text-xs font-medium text-white">Admin</p>
+      <div className="border-t border-ink-800 px-4 py-3">
+        <p className="text-xs font-medium text-white">Admin</p>
         <p className="text-[11px] text-ink-400">support@rayern.com.ng</p>
       </div>
+    </>
+  )
+}
+
+/** Desktop sidebar — unchanged behavior, visible at the md breakpoint and above. */
+function Sidebar() {
+  return (
+    <aside className="hidden w-60 shrink-0 flex-col border-r border-ink-800 bg-ink-900 text-ink-100 md:flex">
+      <div className="flex h-14 items-center gap-2.5 border-b border-ink-800 px-4">
+        <SidebarBrand />
+      </div>
+      <SidebarNav />
     </aside>
   )
 }
 
-function Topbar({ onSignOut }: { onSignOut: () => void }) {
+/**
+ * Mobile navigation drawer, rendered below the md sidebar breakpoint.
+ * Follows the existing Drawer conventions: Escape closes, backdrop
+ * (mousedown on the backdrop itself) closes, body scroll is locked.
+ */
+function MobileSidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const closeRef = useRef<HTMLButtonElement | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    closeRef.current?.focus()
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', onKey)
+    // If the viewport grows back to the sidebar breakpoint while the drawer
+    // is open, hand control back to the desktop sidebar.
+    const mq = window.matchMedia('(min-width: 768px)')
+    const onViewportChange = (): void => {
+      if (mq.matches) onClose()
+    }
+    mq.addEventListener('change', onViewportChange)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      document.removeEventListener('keydown', onKey)
+      mq.removeEventListener('change', onViewportChange)
+    }
+  }, [open, onClose])
+
+  if (!open) return null
+
+  return (
+    <>
+      <div
+        className="fixed inset-0 z-40 bg-ink-900/40 md:hidden"
+        aria-hidden="true"
+        onMouseDown={(e) => {
+          if (e.target === e.currentTarget) onClose()
+        }}
+      />
+      <aside
+        id="mobile-navigation"
+        className="fixed inset-y-0 left-0 z-50 flex w-60 max-w-[85vw] flex-col border-r border-ink-800 bg-ink-900 text-ink-100 shadow-2xl md:hidden"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Navigation menu"
+      >
+        <div className="flex h-14 items-center justify-between gap-2.5 border-b border-ink-800 px-4">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <SidebarBrand />
+          </div>
+          <button
+            ref={closeRef}
+            type="button"
+            onClick={onClose}
+            aria-label="Close navigation menu"
+            className="shrink-0 rounded-md p-1.5 text-ink-400 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
+          </button>
+        </div>
+        <SidebarNav onNavigate={onClose} />
+      </aside>
+    </>
+  )
+}
+
+interface TopbarProps {
+  onSignOut: () => void
+  menuOpen: boolean
+  onOpenMenu: () => void
+  menuButtonRef: { current: HTMLButtonElement | null }
+}
+
+function Topbar({ onSignOut, menuOpen, onOpenMenu, menuButtonRef }: TopbarProps) {
   const operator = session.operator()
   return (
-    <header className="flex h-14 shrink-0 items-center justify-between border-b border-ink-200 bg-white px-6">
+    <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-ink-200 bg-white px-6">
+      <button
+        ref={menuButtonRef}
+        type="button"
+        onClick={onOpenMenu}
+        aria-label="Open navigation menu"
+        aria-expanded={menuOpen}
+        aria-controls="mobile-navigation"
+        className="-ml-2 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-ink-600 hover:bg-ink-100 hover:text-ink-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-400 md:hidden"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M4 6h16M4 12h16M4 18h16" />
+        </svg>
+      </button>
       <PageTitle />
-      <div className="flex items-center gap-3">
+      <div className="flex min-w-0 items-center gap-3">
         <DemoBanner />
         <span className="hidden items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-medium text-emerald-700 sm:flex">
           <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
@@ -181,9 +290,9 @@ function PageTitle() {
   const { pathname } = useLocation()
   const meta = pageTitles[pathname] ?? { title: 'Not found', sub: '' }
   return (
-    <div>
-      <h1 className="text-sm font-semibold text-ink-900">{meta.title}</h1>
-      <p className="text-xs text-ink-500">{meta.sub}</p>
+    <div className="min-w-0 flex-1">
+      <h1 className="truncate text-sm font-semibold text-ink-900">{meta.title}</h1>
+      <p className="truncate text-xs text-ink-500">{meta.sub}</p>
     </div>
   )
 }
@@ -222,11 +331,29 @@ function AuthedApp() {
 }
 
 function Shell({ onSignOut }: { onSignOut: () => void }) {
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const menuButtonRef = useRef<HTMLButtonElement | null>(null)
+  const wasOpenRef = useRef(false)
+
+  const closeMobileNav = useCallback(() => setMobileNavOpen(false), [])
+
+  // Return keyboard focus to the hamburger once the drawer closes.
+  useEffect(() => {
+    if (wasOpenRef.current && !mobileNavOpen) menuButtonRef.current?.focus()
+    wasOpenRef.current = mobileNavOpen
+  }, [mobileNavOpen])
+
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar />
+      <MobileSidebar open={mobileNavOpen} onClose={closeMobileNav} />
       <div className="flex min-w-0 flex-1 flex-col">
-        <Topbar onSignOut={onSignOut} />
+        <Topbar
+          onSignOut={onSignOut}
+          menuOpen={mobileNavOpen}
+          onOpenMenu={() => setMobileNavOpen(true)}
+          menuButtonRef={menuButtonRef}
+        />
         <main className="flex-1 overflow-y-auto scrollbar-thin">
           <Routes>
             <Route path="/" element={<OverviewPage />} />
