@@ -13,16 +13,22 @@
 
 import type {
   AuditEvent,
+  DependencyHealth,
   EmailMessage,
   EmailStats,
   EmailType,
+  EmailUsage,
   ErrorEntry,
   ErrorSeverity,
+  HealthTransition,
+  HistoryRange,
   ObservabilityOverview,
   PlatformMetricsOverview,
   RecentFailure,
   ServiceHealth,
+  ServiceHistory,
   SystemOverview,
+  TelemetryFreshnessInfo,
   User,
   UserStats,
   Workspace,
@@ -257,18 +263,60 @@ export function buildSentEmail(payload: {
   }
 }
 
+/* ------------------------------- Email usage ------------------------------- */
+
+/** Demo usage consistent with the Free-plan defaults (3,000/mo, 100/day). */
+export function buildEmailUsage(): EmailUsage {
+  const monthUsed = 2_145
+  const dayUsed = 43
+  const win = (used: number, limit: number) => ({
+    used,
+    limit,
+    remaining: Math.max(0, limit - used),
+    usedPct: Number(((used / limit) * 100).toFixed(1)),
+  })
+  return {
+    month: win(monthUsed, 3_000),
+    day: win(dayUsed, 100),
+    computedAt: new Date().toISOString(),
+    lastReconciledAt: minutesAgo(30),
+    limits: { monthly: 3_000, daily: 100 },
+  }
+}
+
 /* --------------------------------- System --------------------------------- */
 
+function demoFreshness(status: TelemetryFreshnessInfo['status'] = 'fresh', ageMs = 45_000): TelemetryFreshnessInfo {
+  if (status === 'none' || ageMs === null) {
+    return { lastTelemetryAt: null, ageMs: null, status: 'none' }
+  }
+  return {
+    lastTelemetryAt: new Date(Date.now() - ageMs).toISOString(),
+    ageMs,
+    status,
+  }
+}
+
 export function buildSystemOverview(): SystemOverview {
+  const base = {
+    reason: 'all metrics within thresholds',
+    dataSource: 'self' as const,
+    reportedStatus: null,
+    successCount: 4_812,
+    errorRatePct: 0.21,
+    rpm: 12,
+    slowCount: 3,
+    statusClasses: { c2: 4_796, c3: 16, c4: 12, c5: 4 },
+    freshness: demoFreshness(),
+    lastChange: null,
+    historyKey: null as string | null,
+  }
   const services: ServiceHealth[] = [
-    { id: 'svc_api', name: 'Rayern API', kind: 'api', status: 'healthy', uptimePct30d: 99.98, latencyMsP50: 84, latencyMsP95: 210, lastIncidentAt: daysAgo(19) },
-    { id: 'svc_dash', name: 'Dashboard API', kind: 'api', status: 'healthy', uptimePct30d: 100, latencyMsP50: 41, latencyMsP95: 96, lastIncidentAt: null },
-    { id: 'svc_db', name: 'Primary Database', kind: 'database', status: 'healthy', uptimePct30d: 99.99, latencyMsP50: 12, latencyMsP95: 34, lastIncidentAt: daysAgo(34) },
-    { id: 'svc_replica', name: 'Read Replica', kind: 'database', status: 'degraded', uptimePct30d: 99.72, latencyMsP50: 28, latencyMsP95: 180, lastIncidentAt: minutesAgo(47) },
-    { id: 'svc_cache', name: 'Cache', kind: 'cache', status: 'healthy', uptimePct30d: 99.95, latencyMsP50: 3, latencyMsP95: 9, lastIncidentAt: daysAgo(11) },
-    { id: 'svc_queue', name: 'Job Queue', kind: 'queue', status: 'healthy', uptimePct30d: 99.91, latencyMsP50: 18, latencyMsP95: 65, lastIncidentAt: daysAgo(6) },
-    { id: 'svc_email', name: 'Email Delivery', kind: 'email', status: 'healthy', uptimePct30d: 99.87, latencyMsP50: 220, latencyMsP95: 640, lastIncidentAt: daysAgo(3) },
-    { id: 'svc_storage', name: 'Object Storage', kind: 'storage', status: 'healthy', uptimePct30d: 99.99, latencyMsP50: 45, latencyMsP95: 120, lastIncidentAt: null },
+    { id: 'svc_dash', name: 'Dashboard API', kind: 'api', status: 'healthy', uptimePct30d: 99.97, latencyMsP50: 41, latencyMsP95: 96, lastIncidentAt: null, requestCount: 4_828, ...base, historyKey: 'dashboard-api' },
+    { id: 'svc_db', name: 'PostgreSQL', kind: 'database', status: 'healthy', uptimePct30d: 99.99, latencyMsP50: 12, latencyMsP95: 34, lastIncidentAt: daysAgo(34), requestCount: 9_410, ...base, historyKey: 'postgres' },
+    { id: 'svc_api', name: 'Rayern API', kind: 'api', status: 'healthy', uptimePct30d: 99.98, latencyMsP50: 84, latencyMsP95: 210, lastIncidentAt: daysAgo(19), requestCount: null, successCount: null, errorRatePct: null, rpm: null, slowCount: null, statusClasses: null, dataSource: 'rayern-sync', reportedStatus: null, reason: 'reported by Rayern with the latest successful sync', freshness: demoFreshness('fresh', 4 * 60_000), lastChange: null, historyKey: null },
+    { id: 'svc_replica', name: 'Read Replica', kind: 'database', status: 'degraded', uptimePct30d: 99.72, latencyMsP50: 28, latencyMsP95: 180, lastIncidentAt: minutesAgo(47), requestCount: null, successCount: null, errorRatePct: null, rpm: null, slowCount: null, statusClasses: null, dataSource: 'rayern-sync', reportedStatus: 'degraded', reason: 'reported by Rayern with the latest successful sync', freshness: demoFreshness('fresh', 4 * 60_000), lastChange: { at: minutesAgo(47), from: 'healthy', to: 'degraded', reason: 'replication lag above threshold' }, historyKey: null },
+    { id: 'svc_email', name: 'Resend (email sending)', kind: 'email', status: 'unknown', uptimePct30d: null, latencyMsP50: null, latencyMsP95: null, lastIncidentAt: null, requestCount: 0, successCount: 0, errorRatePct: null, rpm: 0, slowCount: 0, statusClasses: { c2: 0, c3: 0, c4: 0, c5: 0 }, dataSource: 'self', reportedStatus: null, reason: 'no telemetry observed yet', freshness: { lastTelemetryAt: null, ageMs: null, status: 'none' }, lastChange: null, historyKey: 'resend' },
   ]
 
   const requestVolume = []
@@ -281,19 +329,78 @@ export function buildSystemOverview(): SystemOverview {
   }
 
   const recentFailures: RecentFailure[] = [
-    { id: 'fail_1', service: 'Read Replica', time: minutesAgo(47), message: 'Replication lag exceeded 30s threshold', count: 14 },
-    { id: 'fail_2', service: 'Email Delivery', time: minutesAgo(212), message: 'Upstream provider timeout on 3 sends', count: 3 },
-    { id: 'fail_3', service: 'Rayern API', time: minutesAgo(780), message: '5xx spike on /api/workspaces (rate limiter)', count: 27 },
+    {
+      id: 'fail_1', service: 'Dashboard API', route: 'POST /emails/send', statusCategory: '5xx',
+      time: minutesAgo(2), firstSeenAt: minutesAgo(42), lastSeenAt: minutesAgo(2),
+      message: 'Upstream provider rejected the send payload', count: 3,
+    },
+    {
+      id: 'fail_2', service: 'Rayern Sync', route: 'GET /internal/dashboard-metrics', statusCategory: '429',
+      time: minutesAgo(38), firstSeenAt: minutesAgo(38), lastSeenAt: minutesAgo(38),
+      message: 'Rayern API responded with HTTP 429 (rate limited)', count: 1,
+    },
+    {
+      id: 'fail_3', service: 'Rayern API', route: 'GET /api/workspaces', statusCategory: '5xx',
+      time: minutesAgo(780), firstSeenAt: minutesAgo(780), lastSeenAt: minutesAgo(780),
+      message: '5xx spike on workspaces listing (rate limiter)', count: 27,
+    },
+  ]
+
+  const dependencies: DependencyHealth[] = [
+    {
+      id: 'dep:postgresql', name: 'PostgreSQL', kind: 'database', status: 'healthy',
+      reason: 'all metrics within thresholds', availabilityPct: 99.99, requestCount: 9_410,
+      errorCount: 2, errorRatePct: 0.02, p95Ms: 34,
+      lastSuccessAt: minutesAgo(1), lastFailureAt: daysAgo(3), lastObservedAt: minutesAgo(1),
+      freshness: demoFreshness(), configured: true,
+      detail: [
+        { label: 'Probe', value: 'reachable in 3ms' },
+        { label: 'Pool', value: '4 open · 3 idle · 0 waiting' },
+        { label: 'Mode', value: 'managed' },
+      ],
+      historyKey: 'postgres',
+    },
+    {
+      id: 'dep:rayern-metrics', name: 'Rayern metrics endpoint', kind: 'api', status: 'healthy',
+      reason: 'all metrics within thresholds', availabilityPct: 100, requestCount: 48,
+      errorCount: 0, errorRatePct: 0, p95Ms: 412,
+      lastSuccessAt: minutesAgo(4), lastFailureAt: daysAgo(2), lastObservedAt: minutesAgo(4),
+      freshness: demoFreshness('fresh', 4 * 60_000), configured: true,
+      detail: [
+        { label: 'Pull interval', value: '30m' },
+        { label: 'Last pull', value: '412ms' },
+        { label: 'Last HTTP', value: '200' },
+        { label: 'Consecutive failures', value: '0' },
+        { label: 'Data updated', value: new Date(Date.now() - 4 * 60_000).toLocaleString() },
+      ],
+      historyKey: 'rayern-sync',
+    },
+    {
+      id: 'dep:resend', name: 'Resend (email sending)', kind: 'email', status: 'unknown',
+      reason: 'no telemetry observed yet', availabilityPct: null, requestCount: 0,
+      errorCount: 0, errorRatePct: null, p95Ms: null,
+      lastSuccessAt: null, lastFailureAt: null, lastObservedAt: null,
+      freshness: { lastTelemetryAt: null, ageMs: null, status: 'none' }, configured: true,
+      detail: [{ label: 'Observed via', value: 'admin-initiated sends (resend.send spans)' }],
+      historyKey: 'resend',
+    },
   ]
 
   return {
     overall: 'degraded',
     services,
+    dependencies,
     requestVolume,
     errorRatePct: 0.42,
     requestCount24h: requestVolume.reduce((s, p) => s + p.count, 0),
     latency: { p50: 86, p90: 148, p95: 224, p99: 410 },
     recentFailures,
+    overallSummary: {
+      failing: [],
+      degraded: ['Read Replica'],
+      healthy: 4,
+      unknown: 1,
+    },
     sync: {
       enabled: true,
       status: 'healthy' as const,
@@ -304,8 +411,75 @@ export function buildSystemOverview(): SystemOverview {
       consecutiveFailures: 0,
       stale: false,
       running: false,
+      lastDurationMs: 412,
+      lastHttpStatus: 200,
+      dataUpdatedAt: minutesAgo(4),
+      intervalMs: 1_800_000,
+      rateLimitedUntil: null,
+    },
+    metricsSync: {
+      status: 'healthy' as const,
+      reason: 'pulls succeeding on schedule',
+      dataAgeMs: 4 * 60_000,
+    },
+    meta: {
+      processUptimeSec: 86_400,
+      dbLatencyMs: 3,
+      rssBytes: 148 * 1024 * 1024,
+      heapUsedBytes: 62 * 1024 * 1024,
+      heapTotalBytes: 96 * 1024 * 1024,
+      cpuPercent: 7.4,
+      eventLoopDelayP95Ms: 2.8,
+      pool: { total: 4, idle: 3, waiting: 0 },
+      telemetryStaleMs: 900_000,
+      healthThresholds: {
+        errorRateDegradedPct: 1,
+        errorRateFailingPct: 5,
+        latencyP95DegradedMs: 500,
+        latencyP95FailingMs: 2_000,
+      },
     },
   }
+}
+
+/** Demo drill-down series: platform → service → metric → time range. */
+export function buildServiceHistory(service: string, range: HistoryRange): ServiceHistory {
+  const points = range === '30d' ? 30 : range === '7d' ? 168 : 24
+  const stepMs = range === '30d' ? 86_400_000 : 3_600_000
+  const out: ServiceHistory['points'] = []
+  for (let i = points - 1; i >= 0; i--) {
+    const empty = chance(0.12)
+    const requestCount = empty ? 0 : randInt(120, 900)
+    out.push({
+      time: new Date(Date.now() - i * stepMs).toISOString(),
+      requestCount,
+      errorCount: empty ? 0 : Math.round(requestCount * (rand() * 0.03)),
+      errorRatePct: empty ? null : Math.round(rand() * 300) / 100,
+      availabilityPct: empty ? null : Math.round((100 - rand() * 2) * 100) / 100,
+      p95Ms: empty ? null : randInt(80, 640),
+    })
+  }
+  return { service, range, points: out }
+}
+
+/** Demo health-state transitions (the backend dedups real ones the same way). */
+export function buildTransitions(range: HistoryRange): HealthTransition[] {
+  const count = range === '24h' ? 4 : range === '7d' ? 9 : 14
+  const rows: HealthTransition[] = []
+  for (let i = 0; i < count; i++) {
+    const flip = i % 2 === 0
+    rows.push({
+      id: `tr_${i}`,
+      service: pick(['dashboard-api', 'postgres', 'rayern-sync', 'resend']),
+      from: flip ? 'healthy' : 'degraded',
+      to: flip ? 'degraded' : 'healthy',
+      reason: flip ? 'p95 latency 612ms ≥ degraded 500ms' : 'all metrics within thresholds',
+      metric: flip ? 'p95Ms' : '',
+      metricValue: flip ? 612 : null,
+      at: minutesAgo(randInt(10, range === '24h' ? 1_440 : range === '7d' ? 10_080 : 43_200)),
+    })
+  }
+  return rows.sort((a, b) => b.at.localeCompare(a.at))
 }
 
 /* --------------------------------- Errors --------------------------------- */
@@ -331,6 +505,7 @@ export function buildErrors(): ErrorEntry[] {
       endpoint: pick(ENDPOINTS),
       method: pick(['GET', 'POST', 'PATCH']),
       statusCode: status,
+      statusClass: `${Math.floor(status / 100)}xx`,
       message: pick(ERROR_MESSAGES[severity]),
       traceId: chance(0.8) ? [...Array(16)].map(() => '0123456789abcdef'[randInt(0, 15)]).join('') : null,
       count: randInt(1, 48),
@@ -347,15 +522,26 @@ const OPERATIONS = ['GET /aggregate/metrics', 'POST /auth/session', 'db.accounts
 
 export function buildObservability(): ObservabilityOverview {
   const services = ['rayern-api', 'dashboard-api', 'worker', 'email-service']
-  const serviceTelemetry = services.map((s) => ({
-    service: s,
-    requestCount: randInt(4000, 22000),
-    errorRatePct: Math.round(rand() * 220) / 100,
-    p50: randInt(8, 90),
-    p95: randInt(120, 340),
-    p99: randInt(300, 900),
-    status: (chance(0.75) ? 'healthy' : chance(0.6) ? 'degraded' : 'failing') as 'healthy' | 'degraded' | 'failing',
-  }))
+  const serviceTelemetry = services.map((s) => {
+    const requestCount = randInt(4000, 22000)
+    const errorRatePct = Math.round(rand() * 220) / 100
+    const status = (chance(0.7) ? 'healthy' : chance(0.6) ? 'degraded' : chance(0.8) ? 'failing' : 'unknown') as ServiceHealth['status']
+    const errorCount = Math.round((requestCount * errorRatePct) / 100)
+    return {
+      service: s,
+      requestCount,
+      errorCount,
+      successCount: requestCount - errorCount,
+      errorRatePct,
+      p50: randInt(8, 90),
+      p95: randInt(120, 340),
+      p99: randInt(300, 900),
+      status,
+      freshness: status === 'unknown'
+        ? { lastTelemetryAt: new Date(Date.now() - 3 * 3_600_000).toISOString(), ageMs: 3 * 3_600_000, status: 'stale' as const }
+        : demoFreshness(),
+    }
+  })
 
   const recentTraces = []
   for (let i = 0; i < 24; i++) {
@@ -380,14 +566,19 @@ export function buildObservability(): ObservabilityOverview {
   }
   recentTraces.sort((a, b) => b.startTime.localeCompare(a.startTime))
 
-  const slowOperations = OPERATIONS.slice(0, 6).map((op, i) => ({
-    id: `slow_${i}`,
-    service: pick(services),
-    operation: op,
-    p95: randInt(400, 1800),
-    occurrences: randInt(12, 300),
-    lastSeenAt: minutesAgo(randInt(5, 600)),
-  })).sort((a, b) => b.p95 - a.p95)
+  const slowOperations = OPERATIONS.slice(0, 6).map((op, i) => {
+    const p95 = randInt(400, 1800)
+    return {
+      id: `slow_${i}`,
+      service: pick(services),
+      operation: op,
+      p95,
+      avgMs: Math.round(p95 * 0.45),
+      p99: Math.round(p95 * 1.6),
+      occurrences: randInt(12, 300),
+      lastSeenAt: minutesAgo(randInt(5, 600)),
+    }
+  }).sort((a, b) => b.p95 - a.p95)
 
   const errorRateTrend = []
   for (let i = 23; i >= 0; i--) {

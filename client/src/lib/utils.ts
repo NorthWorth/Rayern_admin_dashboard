@@ -110,10 +110,29 @@ export function minutesAgoIso(minutes: number): string {
   return new Date(Date.now() - minutes * 60000).toISOString()
 }
 
-export const HEALTH_ORDER: readonly HealthStatus[] = ['healthy', 'degraded', 'failing']
-
+/** Severity order for rollups: `unknown` is the LEAST severe (no evidence
+ * either way) — it must never be mistaken for a problem or for health. */
+export const HEALTH_ORDER: readonly HealthStatus[] = ['unknown', 'healthy', 'degraded', 'failing']
 export function worstStatus(statuses: readonly HealthStatus[]): HealthStatus {
-  return HEALTH_ORDER[Math.max(...statuses.map((s) => HEALTH_ORDER.indexOf(s)))] ?? 'healthy'
+  if (statuses.length === 0) return 'unknown'
+  return HEALTH_ORDER[Math.max(...statuses.map((s) => HEALTH_ORDER.indexOf(s)))] ?? 'unknown'
+}
+
+export type HealthTone = 'neutral' | 'green' | 'amber' | 'red'
+
+/** Badge tone for the four-state health model — `unknown` renders neutral. */
+export function healthTone(s: HealthStatus): HealthTone {
+  switch (s) {
+    case 'healthy': return 'green'
+    case 'degraded': return 'amber'
+    case 'failing': return 'red'
+    default: return 'neutral'
+  }
+}
+
+/** Badge label for health — `unknown` displays as "No data", not "Unknown". */
+export function healthLabel(s: HealthStatus): string {
+  return s === 'unknown' ? 'No data' : titleCase(s)
 }
 
 export function clsx(...parts: Array<string | false | null | undefined>): string {

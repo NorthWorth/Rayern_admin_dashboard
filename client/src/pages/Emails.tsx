@@ -12,8 +12,8 @@ import { useToast } from '../components/ui/Toast'
 import { useQuery } from '../hooks/useQuery'
 import { emailsService } from '../services/emails'
 import { DEFAULT_FROM } from '../lib/api'
-import { audienceSummary, clsx, formatDateTime, formatNumber, titleCase } from '../lib/utils'
-import type { EmailBodyType, EmailMessage, EmailType } from '../lib/types'
+import { audienceSummary, clsx, formatDateTime, formatNumber, formatPct, titleCase } from '../lib/utils'
+import type { EmailBodyType, EmailMessage, EmailUsageWindow, EmailType } from '../lib/types'
 
 import { emailStatusTone } from './Overview'
 
@@ -36,6 +36,34 @@ function typeTone(t: EmailType): 'blue' | 'green' | 'amber' | 'neutral' {
 const BODY_LABEL: Record<EmailBodyType, string> = { html: 'HTML', text: 'Plain Text' }
 
 /**
+ * Compact quota window (spec §8/§9/§13): `used / limit`, remaining, % used —
+ * straight from persisted backend accounting. Amber/red as the quota fills.
+ */
+function UsageWindow({ label, w }: { label: string; w: EmailUsageWindow }) {
+  const pct = w.usedPct ?? 0
+  const tone = pct >= 90 ? 'bg-red-500' : pct >= 70 ? 'bg-amber-500' : 'bg-accent'
+  return (
+    <div className="min-w-0 flex-1 rounded-lg border border-ink-200 bg-ink-50/60 p-3">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">{label}</p>
+      <p className="mt-1 text-lg font-semibold tabular-nums text-ink-900">
+        {formatNumber(w.used)}
+        <span className="text-sm font-normal text-ink-500"> / {formatNumber(w.limit)}</span>
+      </p>
+      <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-ink-200" role="presentation">
+        <div
+          className={clsx('h-full rounded-full transition-all', tone)}
+          style={{ width: `${Math.min(100, pct)}%` }}
+        />
+      </div>
+      <p className="mt-1.5 text-[11px] text-ink-600">
+        {formatNumber(w.remaining)} remaining
+        {w.usedPct !== null ? ` · ${formatPct(w.usedPct, 1)} used` : ''}
+      </p>
+    </div>
+  )
+}
+
+/**
  * Browser-like document for the HTML preview. Rendered inside a fully
  * sandboxed iframe (sandbox="") — no script, forms, popups or navigation can
  * execute, so untrusted email HTML can never run JS in the dashboard.
@@ -54,10 +82,12 @@ function previewDocument(html: string): string {
 export function EmailsPage() {
   const listQ = useQuery(() => emailsService.list())
   const statsQ = useQuery(() => emailsService.stats())
+  const usageQ = useQuery(() => emailsService.usage())
   const [composerOpen, setComposerOpen] = useState(false)
   const [copySource, setCopySource] = useState<string | null>(null)
 
   const emails = listQ.data ?? []
+  const usage = usageQ.data
 
   const openComposer = (copyId: string | null = null): void => {
     setCopySource(copyId)
@@ -78,6 +108,32 @@ export function EmailsPage() {
           />
         </div>
       </div>
+
+      {/* ------------------------- Resend usage / quota ------------------------ */}
+      <Card>
+        <CardHeader
+          title="Email usage"
+          subtitle="Individual messages accepted by the provider — counted per recipient, never per batch or request"
+        />
+        <CardBody>
+          {usageQ.loading ? (
+            <LoadingBlock rows={2} />
+          ) : usageQ.error ? (
+            <ErrorState message={usageQ.error} onRetry={usageQ.refetch} />
+          ) : usage ? (
+            <div className="space-y-2">
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <UsageWindow label="This month" w={usage.month} />
+                <UsageWindow label="Today" w={usage.day} />
+              </div>
+              <p className="text-[11px] text-ink-400">
+                Limits: {formatNumber(usage.limits.monthly)}/month · {formatNumber(usage.limits.daily)}/day
+                {usage.lastReconciledAt ? ` · last reconciled ${usage.lastReconciledAt.slice(0, 16).replace('T', ' ')}` : ''}
+              </p>
+            </div>
+          ) : null}
+        </CardBody>
+      </Card>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <Card>
@@ -159,6 +215,11 @@ export function EmailsPage() {
                         <td className="whitespace-nowrap px-4 py-2.5">
                           <p className="text-[13px] font-medium text-ink-800">{a.label}</p>
                           {a.breakdown ? <p className="text-[11px] text-ink-400">{a.breakdown}</p> : null}
+                          {e.delivery?.mode === 'expanded' ? (
+                            <p className="text-[11px] text-ink-400">
+                              Provider messages: {formatNumber(e.delivery.providerMessages)} · Batches: {formatNumber(e.delivery.batches)}
+                            </p>
+                          ) : null}
                         </td>
                         <td className="max-w-[16rem] px-3 py-2.5">
                           <p className="truncate text-ink-800" title={e.subject}>{e.subject}</p>
@@ -200,6 +261,9 @@ export function EmailsPage() {
                     </div>
                     <p className="text-xs font-medium text-ink-700">{a.label}</p>
                     {a.breakdown ? <p className="text-[11px] text-ink-400">{a.breakdown}</p> : null}
+                    {e.delivery?.mode === 'expanded' ? (
+                      <p className="text-[11px] text-ink-400">Provider messages: {formatNumber(e.delivery.providerMessages)} · Batches: {formatNumber(e.delivery.batches)}</p>
+                    ) : null}
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                       <Badge tone={typeTone(e.type)}>{TYPE_LABELS[e.type]}</Badge>
                       <span className="text-[10px] uppercase tracking-wide text-ink-400">{BODY_LABEL[e.bodyType]}</span>
@@ -223,7 +287,15 @@ export function EmailsPage() {
         )}
       </Card>
 
-      <EmailComposer open={composerOpen} copyId={copySource} onClose={() => setComposerOpen(false)} onSent={() => listQ.refetch()} />
+      <EmailComposer
+        open={composerOpen}
+        copyId={copySource}
+        onClose={() => setComposerOpen(false)}
+        onSent={() => {
+          listQ.refetch()
+          usageQ.refetch()
+        }}
+      />
     </div>
   )
 }

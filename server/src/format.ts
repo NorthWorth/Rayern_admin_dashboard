@@ -32,6 +32,14 @@ export interface EmailRow {
   type: string
   status: string
   sent_at: Date
+  /** Logical send operation this individual message belongs to (null = legacy). */
+  send_group_id?: string | null
+  /** Individual provider messages in this send group (1 for legacy rows). */
+  message_count?: number
+  /** Provider API requests used by this send group (0 = single/legacy). */
+  batch_count?: number
+  /** Original logical composition for expanded (BCC/CC-only) operations. */
+  group_meta?: { to?: string[]; cc?: string[]; bccCount?: number; mode?: string } | null
 }
 
 export interface AuditRow {
@@ -86,7 +94,17 @@ export function toEmailMessage(row: EmailRow) {
     subject: row.subject,
     bodyType: row.body_type === 'html' ? ('html' as const) : ('text' as const),
     type: row.type as EmailType,
-    status: row.status as EmailStatus,
+    /**
+     * Delivery status of the individual message. `accepted` renders as
+     * 'sent' to the UI (provider-accepted is the dashboard's success state);
+     * `uncertain` renders as 'queued' until reconciliation resolves it.
+     */
+    status:
+      row.status === 'accepted'
+        ? ('sent' as EmailStatus)
+        : row.status === 'uncertain'
+          ? ('queued' as EmailStatus)
+          : (row.status as EmailStatus),
     sentAt: iso(row.sent_at),
   }
 }

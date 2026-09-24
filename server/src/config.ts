@@ -33,6 +33,21 @@ function envNumber(name: string, fallback: number, min: number, max: number): nu
   return Math.min(Math.max(raw, min), max)
 }
 
+/**
+ * Numeric env that REJECTS invalid values instead of silently clamping them:
+ * a malformed override (empty string, typo, garbage) must fall back to the
+ * default — never become NaN. NaN reaching a scheduler would make
+ * `setInterval(fn, NaN)` behave like `setInterval(fn, 1)`, turning a sync
+ * worker into an accidental tight loop.
+ */
+function envFiniteNumber(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw.trim() === '') return fallback
+  const value = Number(raw.trim())
+  if (!Number.isFinite(value)) return fallback
+  return Math.min(Math.max(value, min), max)
+}
+
 /** Boolean env (`1/true/yes` on, `0/false/no` off) with fallback. */
 function envBool(name: string, fallback: boolean): boolean {
   const raw = trimmed(name).toLowerCase()
@@ -110,6 +125,26 @@ export const config = {
     address: process.env.EMAIL_FROM_ADDRESS?.trim() || 'support@rayern.com.ng',
   },
   registrationTrendDays: Number(process.env.REGISTRATION_TREND_DAYS ?? 90),
+
+  /* ------------------------- Resend plan limits ---------------------------- */
+  /**
+   * Usage/quota limits for the Resend account backing the dashboard. The
+   * current Free plan allows 3,000 emails/month and 100/day (the Batch API
+   * accepts up to 100 messages per request — enforced separately as a
+   * transport chunk size). Configurable so a plan upgrade is an env change,
+   * not a code change. Limiting env values are validated (fallback on
+   * invalid) — a broken env can never disable or inflate the accounting.
+   */
+  resend: {
+    monthlyEmailLimit: envFiniteNumber('RESEND_MONTHLY_EMAIL_LIMIT', 3_000, 1, 10_000_000),
+    dailyEmailLimit: envFiniteNumber('RESEND_DAILY_EMAIL_LIMIT', 100, 1, 1_000_000),
+    /** Batch API transport chunk — Resend accepts at most 100 messages/request. */
+    batchChunkSize: envFiniteNumber('RESEND_BATCH_CHUNK_SIZE', 100, 1, 100),
+    /** Reconcile uncertain (timeout/lost-response) batches with Resend. */
+    reconcileUncertainBatches: envBool('RESEND_RECONCILE_UNCERTAIN_BATCHES', true),
+  },
+  /** Usage-lookup depth for /emails/usage (bounded; no full-table scans). */
+  emailUsageWindowDays: envFiniteNumber('EMAIL_USAGE_WINDOW_DAYS', 95, 30, 730),
   /** Serve the compiled dashboard frontend from ../dist (single-origin deploys). */
   serveStatic: (process.env.SERVE_STATIC ?? 'false') === 'true',
   /** Dev/test only: validate + record emails without calling Resend. */
@@ -141,6 +176,14 @@ export const config = {
     traceRetentionHours: envNumber('TELEMETRY_TRACE_RETENTION_HOURS', 48, 1, 8_760),
     requestLogRetentionHours: envNumber('TELEMETRY_REQUEST_LOG_RETENTION_HOURS', 168, 1, 8_760),
     spanMetricsRetentionHours: envNumber('TELEMETRY_SPAN_METRICS_RETENTION_HOURS', 168, 1, 8_760),
+    /** Hourly rollups (service_history) live longer than raw spans — 30 days. */
+    serviceHistoryRetentionHours: envNumber('TELEMETRY_SERVICE_HISTORY_RETENTION_HOURS', 720, 1, 8_760),
+    /** Health-state transitions are small but valuable incident history — 30 days. */
+    transitionRetentionHours: envNumber('TELEMETRY_TRANSITION_RETENTION_HOURS', 720, 1, 8_760),
+    /** How often hourly history rollups are recomputed from trace_spans. */
+    historyRollupMs: envNumber('TELEMETRY_HISTORY_ROLLUP_MS', 300_000, 1_000, 3_600_000),
+    /** Rollup recomputes the trailing N hours (idempotent upserts). */
+    historyRollupWindowHours: envNumber('TELEMETRY_HISTORY_ROLLUP_WINDOW_HOURS', 48, 1, 8_760),
   },
 
   /* --------------------- Deterministic health thresholds ------------------- */
@@ -156,6 +199,12 @@ export const config = {
     availabilityFailingPct: envNumber('HEALTH_AVAILABILITY_FAILING_PCT', 95, 0, 100),
     dbErrorRateDegradedPct: envNumber('HEALTH_DB_ERROR_RATE_DEGRADED_PCT', 1, 0, 100),
     dbErrorRateFailingPct: envNumber('HEALTH_DB_ERROR_RATE_FAILING_PCT', 10, 0, 100),
+    /**
+     * Freshness threshold: when a service has produced no telemetry for
+     * longer than this, its health becomes `unknown` ("no data") instead of
+     * silently staying `healthy`. Absence of telemetry is not proof of health.
+     */
+    telemetryStaleMs: envNumber('HEALTH_TELEMETRY_STALE_MS', 900_000, 5_000, 604_800_000),
   },
 
   /* ------------------------- Rayern pull-sync config ------------------------ */
@@ -166,11 +215,15 @@ export const config = {
     syncEndpoint: rayernSyncEndpoint || (rayernApiBaseUrl ? `${rayernApiBaseUrl.replace(/\/$/, '')}/internal/dashboard-metrics` : ''),
     /** Bearer token sent to Rayern. Lives only on this server; never in the browser. */
     monitoringToken: trimmed('RAYERN_MONITORING_TOKEN'),
-    /** How often the dashboard pulls from Rayern (ms). Default 30 minutes
-     * (1800000 — long enough to stay clear of Rayern's rate limits);
-     * overridable via RAYERN_SYNC_INTERVAL_MS, clamped to a 30s floor so a
-     * misconfiguration can never turn the worker into an aggressive retry loop. */
-    intervalMs: Math.max(Number(process.env.RAYERN_SYNC_INTERVAL_MS ?? 1_800_000), 30_000),
+    /**
+     * How often the dashboard pulls from Rayern (ms). Default 30 minutes
+     * (1800000 — long enough to stay clear of Rayern's rate limits).
+     * Overridable via RAYERN_SYNC_INTERVAL_MS, clamped to a 30s floor so a
+     * misconfiguration can never turn the worker into an aggressive retry
+     * loop. Invalid values fall back to the default instead of becoming NaN
+     * (NaN in setInterval would hammer Rayern ~every millisecond).
+     */
+    intervalMs: envFiniteNumber('RAYERN_SYNC_INTERVAL_MS', 1_800_000, 30_000, 86_400_000),
     /** Per-request timeout (ms) — a hanging Rayern must never hang the worker. */
     timeoutMs: Math.min(Math.max(Number(process.env.RAYERN_SYNC_TIMEOUT_MS ?? 15_000), 2_000), 120_000),
   },

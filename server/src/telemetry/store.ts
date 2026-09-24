@@ -4,8 +4,12 @@
  * Receives redacted, aggregate-only samples from the instrumentation layer
  * (HTTP requests, PostgreSQL queries, internal operations) and derives:
  *  - rolling-window counts / error rates / p50-p95-p99 latency percentiles
+ *  - HTTP status-class distribution and requests-per-minute
  *  - slow-operation windows (per service + operation)
- *  - deterministic health status from configurable thresholds (config.health)
+ *  - deterministic FOUR-STATE health (healthy / degraded / failing / unknown)
+ *    from configurable thresholds (config.health) plus TELEMETRY FRESHNESS:
+ *    stale or absent telemetry yields `unknown`, never a silent `healthy`.
+ *  - health-state transition candidates (persisted + deduplicated by persist.ts)
  *  - runtime/process telemetry (uptime, memory, CPU, event-loop delay)
  *
  * Nothing personal ever enters this store: samples are durations, statuses and
@@ -22,10 +26,23 @@ const MAX_SAMPLES_PER_WINDOW = 20_000
 const MAX_OPERATIONS = 300
 const MAX_PENDING_5XX = 1_000
 
-export type ComponentHealthStatus = 'healthy' | 'degraded' | 'failing'
+/** Four-state health model: `unknown` = no/stale telemetry — not a claim of health. */
+export type ComponentHealthStatus = 'healthy' | 'degraded' | 'failing' | 'unknown'
+
+/** Freshness of a service's telemetry relative to HEALTH_TELEMETRY_STALE_MS. */
+export type TelemetryFreshness = 'fresh' | 'stale' | 'none'
+
+/** Bounded HTTP status-class distribution (1xx/other classes are ignored). */
+export interface StatusClasses {
+  c2: number
+  c3: number
+  c4: number
+  c5: number
+}
 
 export interface WindowSnapshot {
   count: number
+  successCount: number
   errorCount: number
   slowCount: number
   p50Ms: number | null
@@ -33,12 +50,19 @@ export interface WindowSnapshot {
   p99Ms: number | null
   errorRatePct: number | null
   availabilityPct: number | null
+  /** Requests observed in the last 60 seconds (bounded — only when samples exist). */
+  rpm: number
+  classes: StatusClasses
+  /** Newest sample timestamp in the window (null when empty). */
+  lastSampleAt: number | null
 }
 
 interface Sample {
   t: number
   ms: number
   err: boolean
+  /** HTTP status class digit (2..5) — only for HTTP samples; 0 = not HTTP. */
+  cls: number
 }
 
 interface OperationSamples {
@@ -91,24 +115,45 @@ function percentile(sorted: number[], p: number): number | null {
   return sorted[idx]
 }
 
-function snapshotOf(samples: Sample[]): WindowSnapshot {
-  if (samples.length === 0) {
-    return {
-      count: 0,
-      errorCount: 0,
-      slowCount: 0,
-      p50Ms: null,
-      p95Ms: null,
-      p99Ms: null,
-      errorRatePct: null,
-      availabilityPct: null,
-    }
+function classBucket(statusCode: number): number {
+  return Math.floor(statusCode / 100)
+}
+
+function snapshotOf(samples: Sample[], now = Date.now()): WindowSnapshot {
+  const empty: WindowSnapshot = {
+    count: 0,
+    successCount: 0,
+    errorCount: 0,
+    slowCount: 0,
+    p50Ms: null,
+    p95Ms: null,
+    p99Ms: null,
+    errorRatePct: null,
+    availabilityPct: null,
+    rpm: 0,
+    classes: { c2: 0, c3: 0, c4: 0, c5: 0 },
+    lastSampleAt: null,
   }
+  if (samples.length === 0) return empty
   const durations = samples.map((s) => s.ms).sort((a, b) => a - b)
-  const errorCount = samples.reduce((n, s) => n + (s.err ? 1 : 0), 0)
+  const classes: StatusClasses = { c2: 0, c3: 0, c4: 0, c5: 0 }
+  let errorCount = 0
+  let lastSampleAt = 0
+  let recent = 0
+  const minuteAgo = now - 60_000
+  for (const s of samples) {
+    if (s.err) errorCount++
+    if (s.cls === 2) classes.c2++
+    else if (s.cls === 3) classes.c3++
+    else if (s.cls === 4) classes.c4++
+    else if (s.cls === 5) classes.c5++
+    if (s.t > lastSampleAt) lastSampleAt = s.t
+    if (s.t >= minuteAgo) recent++
+  }
   const errorRatePct = (errorCount / samples.length) * 100
   return {
     count: samples.length,
+    successCount: samples.length - errorCount,
     errorCount,
     slowCount: 0,
     p50Ms: percentile(durations, 50),
@@ -116,6 +161,9 @@ function snapshotOf(samples: Sample[]): WindowSnapshot {
     p99Ms: percentile(durations, 99),
     errorRatePct: Number(errorRatePct.toFixed(4)),
     availabilityPct: Number((100 - errorRatePct).toFixed(4)),
+    rpm: recent,
+    classes,
+    lastSampleAt,
   }
 }
 
@@ -130,9 +178,12 @@ export function recordHttp(input: {
   traceId: string | null
 }): void {
   if (!config.telemetry.enabled) return
+  // Error = server error (5xx). 4xx are client outcomes and are surfaced via
+  // the status-class distribution instead of inflating the error rate.
   const err = input.statusCode >= 500
   const now = Date.now()
-  const sample: Sample = { t: now, ms: input.durationMs, err }
+  const cls = classBucket(input.statusCode)
+  const sample: Sample = { t: now, ms: input.durationMs, err, cls: cls >= 2 && cls <= 5 ? cls : 0 }
 
   const key = 'dashboard-api'
   let list = windows.get(key)
@@ -164,7 +215,7 @@ export function recordHttp(input: {
 export function recordDb(input: { operation: string; durationMs: number; ok: boolean }): void {
   if (!config.telemetry.enabled) return
   const now = Date.now()
-  const sample: Sample = { t: now, ms: input.durationMs, err: !input.ok }
+  const sample: Sample = { t: now, ms: input.durationMs, err: !input.ok, cls: 0 }
 
   let list = windows.get('postgres')
   if (!list) windows.set('postgres', (list = []))
@@ -184,7 +235,7 @@ export function recordDb(input: { operation: string; durationMs: number; ok: boo
 export function recordOperation(input: { service: string; operation: string; durationMs: number; ok: boolean }): void {
   if (!config.telemetry.enabled) return
   const now = Date.now()
-  const sample: Sample = { t: now, ms: input.durationMs, err: !input.ok }
+  const sample: Sample = { t: now, ms: input.durationMs, err: !input.ok, cls: 0 }
 
   let list = windows.get(input.service)
   if (!list) windows.set(input.service, (list = []))
@@ -217,7 +268,9 @@ export function serviceNamesWithSamples(): string[] {
 export interface OperationStat {
   service: string
   operation: string
+  avgMs: number
   p95Ms: number
+  p99Ms: number
   occurrences: number
   lastSeenAt: number
 }
@@ -232,10 +285,14 @@ export function operationStats(): OperationStat[] {
     const durations = samples.map((s) => s.ms).sort((a, b) => a - b)
     const p95 = percentile(durations, 95)
     if (p95 === null) continue
+    const p99 = percentile(durations, 99)
+    const avg = durations.reduce((a, b) => a + b, 0) / durations.length
     stats.push({
       service: op.service,
       operation: op.operation,
+      avgMs: Number(avg.toFixed(2)),
       p95Ms: p95,
+      p99Ms: p99 ?? p95,
       occurrences: samples.length,
       lastSeenAt: op.lastSeen,
     })
@@ -252,111 +309,219 @@ export function drainApiErrors5xx(): ApiErrorBucket[] {
 
 /* --------------------------- Deterministic health ------------------------- */
 
-export interface ComponentHealth {
-  status: ComponentHealthStatus
-  /** null when the rolling window has no samples — never a fake 0/100. */
-  sampleCount: number
-  errorRatePct: number | null
-  availabilityPct: number | null
-  p50Ms: number | null
-  p95Ms: number | null
-  p99Ms: number | null
-  slowCount: number
-}
-
-function healthFromSnapshot(snap: WindowSnapshot, thresholds: {
+export interface HealthThresholds {
   errorRateDegradedPct: number
   errorRateFailingPct: number
   p95DegradedMs: number
   p95FailingMs: number
   availabilityDegradedPct: number
   availabilityFailingPct: number
+}
+
+export interface ComponentHealth {
+  status: ComponentHealthStatus
+  /** Human-readable trigger for the current state (transition reason source). */
+  reason: string | null
+  /** null when the rolling window has no samples — never a fake 0/100. */
+  sampleCount: number
+  successCount: number
+  errorCount: number
+  errorRatePct: number | null
+  availabilityPct: number | null
+  p50Ms: number | null
+  p95Ms: number | null
+  p99Ms: number | null
+  slowCount: number
+  rpm: number
+  classes: StatusClasses
+  /** Newest telemetry timestamp (ms epoch) — the freshness source of truth. */
+  lastTelemetryAt: number | null
+  telemetryAgeMs: number | null
+  freshness: TelemetryFreshness
+  /** Newest success/failure observation in the window (dependency health). */
+  lastSuccessAt: number | null
+  lastFailureAt: number | null
+}
+
+/**
+ * Freshness threshold for a service: how old telemetry may get before health
+ * degrades to `unknown`. The Rayern pull-sync is expected only once per
+ * (default) 30-minute interval, so its allowance scales with the configured
+ * interval instead of the general 15-minute default.
+ */
+export function staleMsFor(service: string): number {
+  const base = config.health.telemetryStaleMs
+  if (service === 'rayern-sync' && config.rayern.syncEndpoint) {
+    return Math.max(base, Math.round(config.rayern.intervalMs * 1.5))
+  }
+  return base
+}
+
+export function freshnessOf(lastTelemetryAt: number | null, now: number, staleMs: number): TelemetryFreshness {
+  if (lastTelemetryAt === null) return 'none'
+  return now - lastTelemetryAt > staleMs ? 'stale' : 'fresh'
+}
+
+function fmt(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(2)
+}
+
+/**
+ * Pure, deterministic health evaluation over a window snapshot.
+ *
+ * States:
+ *  - `unknown`  — no samples at all, OR telemetry older than `staleMs`
+ *                 (absence of telemetry is never reported as healthy)
+ *  - `failing`  — a failing threshold is crossed (>= error rate / p95,
+ *                 < availability)
+ *  - `degraded` — a degraded threshold is crossed
+ *  - `healthy`  — fresh telemetry and every metric within thresholds
+ *
+ * Latency/availability are only reported when `count >= minSamples`.
+ * Boundary semantics are strict and tested: a metric exactly AT a threshold
+ * counts as crossing it (`>=` for error/latency, `<` for availability).
+ */
+export function evaluateHealth(input: {
+  snapshot: WindowSnapshot
+  thresholds: HealthThresholds
+  minSamples: number
+  staleMs: number
+  now?: number
+  slowCount?: number
 }): ComponentHealth {
+  const { snapshot: snap, thresholds, minSamples, staleMs } = input
+  const now = input.now ?? Date.now()
+  const slowCount = input.slowCount ?? snap.slowCount
+  const freshness = freshnessOf(snap.lastSampleAt, now, staleMs)
+  const ageMs = snap.lastSampleAt === null ? null : now - snap.lastSampleAt
+  // Latency is only REPORTED once the window has minSamples observations —
+  // below that it is null (never a fake 0ms), matching the threshold gate.
+  const sufficient = snap.count >= minSamples
+
+  const base = {
+    sampleCount: snap.count,
+    successCount: snap.successCount,
+    errorCount: snap.errorCount,
+    errorRatePct: snap.errorRatePct,
+    availabilityPct: snap.availabilityPct,
+    p50Ms: sufficient ? snap.p50Ms : null,
+    p95Ms: sufficient ? snap.p95Ms : null,
+    p99Ms: sufficient ? snap.p99Ms : null,
+    slowCount,
+    rpm: snap.rpm,
+    classes: snap.classes,
+    lastTelemetryAt: snap.lastSampleAt,
+    telemetryAgeMs: ageMs,
+    freshness,
+    lastSuccessAt: null as number | null,
+    lastFailureAt: null as number | null,
+  }
+
   if (snap.count === 0) {
-    // Insufficient telemetry: status is healthy-by-default (no evidence of a
-    // problem) but every measured field is null — nothing is faked.
+    return { ...base, status: 'unknown', reason: 'no telemetry observed yet' }
+  }
+  if (freshness !== 'fresh') {
+    const mins = ageMs !== null ? Math.max(1, Math.round(ageMs / 60_000)) : null
     return {
-      status: 'healthy',
-      sampleCount: 0,
-      errorRatePct: null,
-      availabilityPct: null,
-      p50Ms: null,
-      p95Ms: null,
-      p99Ms: null,
-      slowCount: 0,
+      ...base,
+      status: 'unknown',
+      reason: mins !== null ? `telemetry stale — no observations for ${mins}m` : 'telemetry stale',
     }
   }
-  const sufficient = snap.count >= config.health.minSamples
+
   const errorRate = snap.errorRatePct ?? 0
   const availability = snap.availabilityPct ?? 100
   const p95 = sufficient ? snap.p95Ms : null
 
-  let status: ComponentHealthStatus = 'healthy'
-  const failsError = errorRate >= thresholds.errorRateFailingPct
-  const failsLatency = p95 !== null && p95 >= thresholds.p95FailingMs
-  const failsAvailability = sufficient && availability < thresholds.availabilityFailingPct
+  const failError = errorRate >= thresholds.errorRateFailingPct
+  const failLatency = p95 !== null && p95 >= thresholds.p95FailingMs
+  const failAvailability = sufficient && availability < thresholds.availabilityFailingPct
   const degradeError = errorRate >= thresholds.errorRateDegradedPct
   const degradeLatency = p95 !== null && p95 >= thresholds.p95DegradedMs
   const degradeAvailability = sufficient && availability < thresholds.availabilityDegradedPct
 
-  if (failsError || failsLatency || failsAvailability) status = 'failing'
-  else if (degradeError || degradeLatency || degradeAvailability) status = 'degraded'
+  if (failError) {
+    return { ...base, status: 'failing', reason: `error rate ${fmt(errorRate)}% ≥ failing ${fmt(thresholds.errorRateFailingPct)}%` }
+  }
+  if (failLatency) {
+    return { ...base, status: 'failing', reason: `p95 latency ${fmt(p95 ?? 0)}ms ≥ failing ${thresholds.p95FailingMs}ms` }
+  }
+  if (failAvailability) {
+    return { ...base, status: 'failing', reason: `availability ${fmt(availability)}% < failing ${fmt(thresholds.availabilityFailingPct)}%` }
+  }
+  if (degradeError) {
+    return { ...base, status: 'degraded', reason: `error rate ${fmt(errorRate)}% ≥ degraded ${fmt(thresholds.errorRateDegradedPct)}%` }
+  }
+  if (degradeLatency) {
+    return { ...base, status: 'degraded', reason: `p95 latency ${fmt(p95 ?? 0)}ms ≥ degraded ${thresholds.p95DegradedMs}ms` }
+  }
+  if (degradeAvailability) {
+    return { ...base, status: 'degraded', reason: `availability ${fmt(availability)}% < degraded ${fmt(thresholds.availabilityDegradedPct)}%` }
+  }
+  return { ...base, status: 'healthy', reason: 'all metrics within thresholds' }
+}
 
+function windowHealthWithSlow(service: string, thresholds: HealthThresholds): ComponentHealth {
+  const snap = serviceSnapshot(service)
+  const slow = countSlow(service)
+  const samples = window(windows.get(service))
+  let lastSuccessAt: number | null = null
+  let lastFailureAt: number | null = null
+  for (const s of samples) {
+    if (s.err) {
+      if (lastFailureAt === null || s.t > lastFailureAt) lastFailureAt = s.t
+    } else if (lastSuccessAt === null || s.t > lastSuccessAt) {
+      lastSuccessAt = s.t
+    }
+  }
+  const health = evaluateHealth({
+    snapshot: snap,
+    thresholds,
+    minSamples: config.health.minSamples,
+    staleMs: staleMsFor(service),
+    slowCount: slow,
+  })
+  health.lastSuccessAt = lastSuccessAt
+  health.lastFailureAt = lastFailureAt
+  return health
+}
+
+/** Thresholds for the dashboard API and generic services (config-driven). */
+function defaultThresholds(): HealthThresholds {
   return {
-    status,
-    sampleCount: snap.count,
-    errorRatePct: errorRate,
-    availabilityPct: availability,
-    p50Ms: sufficient ? snap.p50Ms : null,
-    p95Ms: p95,
-    p99Ms: sufficient ? snap.p99Ms : null,
-    slowCount: snap.slowCount,
+    errorRateDegradedPct: config.health.errorRateDegradedPct,
+    errorRateFailingPct: config.health.errorRateFailingPct,
+    p95DegradedMs: config.health.latencyP95DegradedMs,
+    p95FailingMs: config.health.latencyP95FailingMs,
+    availabilityDegradedPct: config.health.availabilityDegradedPct,
+    availabilityFailingPct: config.health.availabilityFailingPct,
+  }
+}
+
+/** Thresholds for PostgreSQL (its own error-rate tolerances). */
+function dbThresholds(): HealthThresholds {
+  return {
+    ...defaultThresholds(),
+    errorRateDegradedPct: config.health.dbErrorRateDegradedPct,
+    errorRateFailingPct: config.health.dbErrorRateFailingPct,
   }
 }
 
 /** Health of the dashboard API's own HTTP surface (real telemetry only). */
 export function computeApiHealth(): ComponentHealth {
-  const snap = serviceSnapshot('dashboard-api')
-  const slow = countSlow('dashboard-api')
-  snap.slowCount = slow
-  return healthFromSnapshot(snap, {
-    errorRateDegradedPct: config.health.errorRateDegradedPct,
-    errorRateFailingPct: config.health.errorRateFailingPct,
-    p95DegradedMs: config.health.latencyP95DegradedMs,
-    p95FailingMs: config.health.latencyP95FailingMs,
-    availabilityDegradedPct: config.health.availabilityDegradedPct,
-    availabilityFailingPct: config.health.availabilityFailingPct,
-  })
+  return windowHealthWithSlow('dashboard-api', defaultThresholds())
 }
 
 /** Health of the dashboard's PostgreSQL dependency (query success/latency). */
 export function computeDbHealth(): ComponentHealth {
-  const snap = serviceSnapshot('postgres')
-  snap.slowCount = countSlow('postgres')
-  return healthFromSnapshot(snap, {
-    errorRateDegradedPct: config.health.dbErrorRateDegradedPct,
-    errorRateFailingPct: config.health.dbErrorRateFailingPct,
-    p95DegradedMs: config.health.latencyP95DegradedMs,
-    p95FailingMs: config.health.latencyP95FailingMs,
-    availabilityDegradedPct: config.health.availabilityDegradedPct,
-    availabilityFailingPct: config.health.availabilityFailingPct,
-  })
+  return windowHealthWithSlow('postgres', dbThresholds())
 }
 
-/** Generic per-service status used for service_telemetry rows. */
+/** Generic per-service health from the rolling window. */
 export function computeServiceStatus(service: string): ComponentHealth {
   if (service === 'dashboard-api') return computeApiHealth()
   if (service === 'postgres') return computeDbHealth()
-  const snap = serviceSnapshot(service)
-  snap.slowCount = countSlow(service)
-  return healthFromSnapshot(snap, {
-    errorRateDegradedPct: config.health.errorRateDegradedPct,
-    errorRateFailingPct: config.health.errorRateFailingPct,
-    p95DegradedMs: config.health.latencyP95DegradedMs,
-    p95FailingMs: config.health.latencyP95FailingMs,
-    availabilityDegradedPct: config.health.availabilityDegradedPct,
-    availabilityFailingPct: config.health.availabilityFailingPct,
-  })
+  return windowHealthWithSlow(service, defaultThresholds())
 }
 
 function countSlow(service: string): number {
@@ -366,6 +531,35 @@ function countSlow(service: string): number {
     if (s.ms >= threshold) n++
   }
   return n
+}
+
+/**
+ * Whether a health-state change should be persisted as a transition.
+ * Deduplication rule: only an ACTUAL change of the previously recorded state
+ * creates a row — an ongoing condition never produces duplicates, and the
+ * first-ever observation (previous = null) is an initial state, not a
+ * transition. Exported for tests.
+ */
+export function shouldRecordTransition(
+  previous: ComponentHealthStatus | null,
+  next: ComponentHealthStatus,
+): boolean {
+  return previous !== null && previous !== next
+}
+
+/** Aggregate worst-case rollup used for the platform `overall` status. */
+export function worstHealth(statuses: readonly ComponentHealthStatus[]): ComponentHealthStatus {
+  const rank: Record<ComponentHealthStatus, number> = { unknown: 0, healthy: 1, degraded: 2, failing: 3 }
+  let worst: ComponentHealthStatus = 'unknown'
+  for (const s of statuses) {
+    if (rank[s] > rank[worst]) worst = s
+  }
+  // All-unknown (or empty) stays unknown; a single healthy observation wins
+  // over unknown because there IS evidence of health.
+  if (worst === 'unknown') {
+    return statuses.includes('healthy') ? 'healthy' : 'unknown'
+  }
+  return worst
 }
 
 /* ------------------------------ Runtime health ---------------------------- */

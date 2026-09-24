@@ -62,6 +62,9 @@ router.get('/', async (req, res, next) => {
         endpoint: r.endpoint,
         method: r.method,
         statusCode: r.status_code,
+        // Bounded status class (2xx/3xx/4xx/5xx) for grouping — derived from
+        // the status code only, never from user-controlled content.
+        statusClass: r.status_code >= 100 && r.status_code < 600 ? `${Math.floor(r.status_code / 100)}xx` : 'n/a',
         message: r.message,
         traceId: r.trace_id ?? null,
         count: r.count,

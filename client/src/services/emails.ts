@@ -1,6 +1,13 @@
 import { apiRequest, DEFAULT_FROM, USE_DEMO_DATA } from '../lib/api'
-import type { ComposeEmailPayload, EmailBodyType, EmailMessage, EmailStats, EmailType } from '../lib/types'
-import { buildEmails, buildEmailStats, buildSentEmail } from './demoData'
+import type {
+  ComposeEmailPayload,
+  EmailBodyType,
+  EmailMessage,
+  EmailStats,
+  EmailType,
+  EmailUsage,
+} from '../lib/types'
+import { buildEmails, buildEmailStats, buildEmailUsage, buildSentEmail } from './demoData'
 
 const demoEmails = buildEmails()
 
@@ -30,6 +37,18 @@ export const emailsService = {
     return apiRequest<{ count: number; recipients: string[] }>(`/emails/audience?verification=${verification}`)
   },
 
+  /** Persisted monthly/daily usage + remaining quota (backend-computed). */
+  usage(): Promise<EmailUsage> {
+    if (USE_DEMO_DATA) return delay(buildEmailUsage())
+    return apiRequest<EmailUsage>('/emails/usage')
+  },
+
+  /** Reconcile uncertain submissions with the provider (safe to call anytime). */
+  reconcile(): Promise<{ usage: EmailUsage }> {
+    if (USE_DEMO_DATA) return delay({ usage: buildEmailUsage() })
+    return apiRequest<{ usage: EmailUsage }>('/emails/usage/reconcile', { method: 'POST' })
+  },
+
   /**
    * Content of a past email for "copy as new email" (never auto-sends).
    * Includes bodyType so the composer reopens in the original mode.
@@ -52,7 +71,12 @@ export const emailsService = {
     return apiRequest<typeof shape>(`/emails/${id}/body`)
   },
 
-  /** Sends an admin-composed email through the dashboard backend. */
+  /**
+   * Sends an admin-composed email through the dashboard backend. A
+   * client-generated idempotency key makes a retried/double-clicked request
+   * replay the original result instead of sending twice (the backend is the
+   * authoritative dedup — this key just survives a lost first response).
+   */
   async send(payload: ComposeEmailPayload & { type?: EmailType }): Promise<EmailMessage> {
     const body = { ...payload, from: payload.from || DEFAULT_FROM }
     if (USE_DEMO_DATA) {
@@ -61,6 +85,7 @@ export const emailsService = {
         900,
       )
     }
-    return apiRequest<EmailMessage>('/emails/send', { method: 'POST', body })
+    const idempotencyKey = crypto.randomUUID()
+    return apiRequest<EmailMessage>('/emails/send', { method: 'POST', body: { ...body, idempotencyKey } })
   },
 }

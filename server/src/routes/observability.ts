@@ -6,11 +6,14 @@
  */
 import { Router } from 'express'
 import { query } from '../db'
+import { staleMsFor } from '../telemetry'
+import type { ComponentHealthStatus, TelemetryFreshness } from '../telemetry'
 
 const router = Router()
 
 router.get('/overview', async (_req, res, next) => {
   try {
+    const now = Date.now()
     const serviceRows = await query<{
       service: string
       request_count: string
@@ -19,8 +22,9 @@ router.get('/overview', async (_req, res, next) => {
       p95: string
       p99: string
       status: string
+      updated_at: Date
     }>(
-      `SELECT service, request_count, error_rate_pct, p50, p95, p99, status
+      `SELECT service, request_count, error_rate_pct, p50, p95, p99, status, updated_at
        FROM service_telemetry ORDER BY service`,
     )
 
@@ -45,16 +49,20 @@ router.get('/overview', async (_req, res, next) => {
       service: string
       operation: string
       p95: string
+      avg_ms: string
+      p99: string
       occurrences: string
       last_seen_at: Date
     }>(
-      `SELECT id, service, operation, p95, occurrences, last_seen_at
+      `SELECT id, service, operation, p95, avg_ms, p99, occurrences, last_seen_at
        FROM slow_operations ORDER BY p95 DESC LIMIT 10`,
     )
 
-    const trendRows = await query<{ bucket: string; error_rate_pct: string }>(
+    // Empty buckets return NULL ("no traffic") — never a fabricated 0% error
+    // rate that would read as "everything fine".
+    const trendRows = await query<{ bucket: string; error_rate_pct: string | null }>(
       `SELECT to_char(b.bucket, 'YYYY-MM-DD"T"HH24:MI') AS bucket,
-              COALESCE(ROUND(SUM(s.error_count)::numeric / NULLIF(SUM(s.request_count), 0) * 100, 2), 0)::text AS error_rate_pct
+              ROUND(SUM(s.error_count)::numeric / NULLIF(SUM(s.request_count), 0) * 100, 2)::text AS error_rate_pct
        FROM generate_series(
          date_trunc('hour', now() - interval '23 hours'),
          date_trunc('hour', now()),
@@ -65,15 +73,35 @@ router.get('/overview', async (_req, res, next) => {
     )
 
     res.json({
-      services: serviceRows.map((r) => ({
-        service: r.service,
-        requestCount: Number(r.request_count),
-        errorRatePct: Number(r.error_rate_pct),
-        p50: Number(r.p50),
-        p95: Number(r.p95),
-        p99: Number(r.p99),
-        status: r.status as 'healthy' | 'degraded' | 'failing',
-      })),
+      services: serviceRows.map((r) => {
+        // Freshness: updated_at is the LAST REAL TELEMETRY timestamp (the
+        // flush loop preserves it). Read-time safety net — a row older than
+        // the freshness threshold can never be served as healthy.
+        const ageMs = now - r.updated_at.getTime()
+        const freshness: TelemetryFreshness =
+          ageMs <= 0 ? 'none' : ageMs > staleMsFor(r.service) ? 'stale' : 'fresh'
+        const persisted = r.status as ComponentHealthStatus
+        const status: ComponentHealthStatus = freshness === 'fresh' ? persisted : 'unknown'
+        const requestCount = Number(r.request_count)
+        const errorRatePct = Number(r.error_rate_pct)
+        const errorCount = Math.round((requestCount * errorRatePct) / 100)
+        return {
+          service: r.service,
+          requestCount,
+          errorCount,
+          successCount: Math.max(0, requestCount - errorCount),
+          errorRatePct,
+          p50: Number(r.p50),
+          p95: Number(r.p95),
+          p99: Number(r.p99),
+          status,
+          freshness: {
+            lastTelemetryAt: r.updated_at.toISOString(),
+            ageMs,
+            status: freshness,
+          },
+        }
+      }),
       recentTraces: traceRows.map((r) => ({
         id: r.id,
         traceId: r.trace_id,
@@ -91,10 +119,15 @@ router.get('/overview', async (_req, res, next) => {
         service: r.service,
         operation: r.operation,
         p95: Number(r.p95),
+        avgMs: Number(r.avg_ms ?? 0),
+        p99: Number(r.p99 ?? r.p95),
         occurrences: Number(r.occurrences),
         lastSeenAt: r.last_seen_at.toISOString(),
       })),
-      errorRateTrend: trendRows.map((r) => ({ time: r.bucket, errorRatePct: Number(r.error_rate_pct) })),
+      errorRateTrend: trendRows.map((r) => ({
+        time: r.bucket,
+        errorRatePct: r.error_rate_pct === null ? null : Number(r.error_rate_pct),
+      })),
     })
   } catch (err) {
     next(err)

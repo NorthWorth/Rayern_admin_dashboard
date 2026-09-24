@@ -165,6 +165,68 @@ export async function initDb(): Promise<void> {
   // "copy as new" preserve how the message was sent.
   await query(`ALTER TABLE emails ADD COLUMN IF NOT EXISTS body_type TEXT NOT NULL DEFAULT 'text'`)
 
+  /* --------------------- Batch delivery / usage accounting ----------------- */
+  // Idempotency: deterministic key per provider message
+  // (logical-send-id:index). Retries re-submit with the SAME key, so Resend
+  // (or the unique index below for the local DB) deduplicates instead of
+  // re-sending. Written only after a provider submission attempt.
+  await query(`ALTER TABLE emails ADD COLUMN IF NOT EXISTS idempotency_key TEXT`)
+  // The logical send operation the admin performed — one id per composer
+  // submission, shared by every expanded message of that operation.
+  await query(`ALTER TABLE emails ADD COLUMN IF NOT EXISTS send_group_id TEXT`)
+  // How many individual provider messages this logical operation produced,
+  // and how many provider requests (batch API calls) carried them. The pair
+  // lets history show "BCC: 100 recipients · Provider messages: 100 ·
+  // Batches: 1" without ever counting a batch as one email.
+  await query(`ALTER TABLE emails ADD COLUMN IF NOT EXISTS message_count INTEGER NOT NULL DEFAULT 1`)
+  await query(`ALTER TABLE emails ADD COLUMN IF NOT EXISTS batch_count INTEGER NOT NULL DEFAULT 0`)
+  // Usage semantics per individual provider message:
+  //   accepted  → provider confirmed receipt (usage counts THIS)
+  //   uncertain → submission outcome unknown (timeout/lost response) — NOT
+  //               counted until reconciliation resolves it
+  //   failed    → provider rejected / not submitted — never counted
+  // Provider message id per individual message (the batch response returns
+  // one id per message — stored so reconciliation/audit can reference them).
+  // Added BEFORE the backfill statements below reference it.
+  await query(`ALTER TABLE emails ADD COLUMN IF NOT EXISTS provider_message_id TEXT`)
+  await query(`
+    ALTER TABLE emails DROP CONSTRAINT IF EXISTS emails_status_check
+  `)
+  await query(`
+    ALTER TABLE emails ADD CONSTRAINT emails_status_check
+    CHECK (status IN ('queued','sent','delivered','accepted','uncertain','failed','bounced'))
+  `)
+  // Historical rows predate batch delivery and always counted toward usage:
+  // single-recipient/successful legacy rows are 'accepted'; failures stay
+  // failed. sent/delivered keep their meaning (legacy + post-send states).
+  await query(`
+    UPDATE emails SET status = 'accepted'
+    WHERE status = 'sent' AND batch_count = 0 AND message_count = 1
+  `)
+  // Seed provider_message_id from legacy resend_id ONLY when it is a real
+  // non-empty id. Empty strings (dry-run/no-op rows) must stay NULL — the
+  // unique index below would otherwise collapse every empty value into a
+  // duplicate-key violation on the second insert.
+  await query(`
+    UPDATE emails SET provider_message_id = resend_id
+    WHERE provider_message_id IS NULL AND resend_id IS NOT NULL AND resend_id <> ''
+  `)
+  // Group metadata for expanded (BCC) operations: the ORIGINAL logical
+  // composition (visible To/CC), the delivery mode, and total recipients.
+  // One row per group carries this identically; history collapses expanded
+  // groups back into the admin's single logical action using it.
+  await query(`ALTER TABLE emails ADD COLUMN IF NOT EXISTS group_meta JSONB`)
+  // Deterministic duplicate protection: a provider message id can be recorded
+  // at most once (partial — NULLs are exempt, legacy rows keep working).
+  await query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_emails_provider_message_id
+    ON emails (provider_message_id)
+    WHERE provider_message_id IS NOT NULL
+  `)
+  // Usage lookups aggregate by status over a time window; this keeps them
+  // cheap (the existing sent_at index covers the ordering path).
+  await query(`CREATE INDEX IF NOT EXISTS idx_emails_status_sent ON emails (status, sent_at)`)
+
   await query(`
     CREATE TABLE IF NOT EXISTS rayern_sync_state (
       key         TEXT PRIMARY KEY,
@@ -286,6 +348,63 @@ export async function initDb(): Promise<void> {
       error_count    BIGINT NOT NULL DEFAULT 0
     )
   `)
+
+  /* ---------------- Platform health / observability (spec §7–§9) ------------ */
+  // Health-state transitions: one row per genuine state change (deduplicated
+  // by the flush loop comparing against the persisted status — an ongoing
+  // condition never produces duplicate rows). Aggregate-only: service name,
+  // statuses, reason and a single metric value. Never customer data.
+  await query(`
+    CREATE TABLE IF NOT EXISTS health_transitions (
+      id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      service     TEXT NOT NULL,
+      from_status TEXT NOT NULL,
+      to_status   TEXT NOT NULL,
+      reason      TEXT NOT NULL DEFAULT '',
+      metric      TEXT NOT NULL DEFAULT '',
+      metric_value NUMERIC,
+      triggered_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `)
+  await query(`CREATE INDEX IF NOT EXISTS idx_health_transitions_time ON health_transitions (triggered_at)`)
+  await query(`CREATE INDEX IF NOT EXISTS idx_health_transitions_service ON health_transitions (service, triggered_at)`)
+
+  // Hourly per-service rollups derived from trace_spans (idempotent
+  // recomputation). This is the long-retention aggregate layer for the
+  // 24h / 7d / 30d health history charts — raw spans keep their short
+  // retention while history stays queryable for 30 days by default.
+  await query(`
+    CREATE TABLE IF NOT EXISTS service_history (
+      bucket_start  TIMESTAMPTZ NOT NULL,
+      service       TEXT NOT NULL,
+      request_count BIGINT NOT NULL DEFAULT 0,
+      error_count   BIGINT NOT NULL DEFAULT 0,
+      slow_count    BIGINT NOT NULL DEFAULT 0,
+      p50           NUMERIC,
+      p95           NUMERIC,
+      p99           NUMERIC,
+      PRIMARY KEY (service, bucket_start)
+    )
+  `)
+  await query(`CREATE INDEX IF NOT EXISTS idx_service_history_bucket ON service_history (bucket_start)`)
+
+  // Four-state health model: `unknown` = no recent telemetry / not observed.
+  // (service_health keeps its original 3-state CHECK — Rayern-reported rows
+  // only ever carry Rayern's three states; staleness for those is applied at
+  // read time.)
+  await query(`ALTER TABLE service_telemetry DROP CONSTRAINT IF EXISTS service_telemetry_status_check`)
+  await query(`
+    ALTER TABLE service_telemetry ADD CONSTRAINT service_telemetry_status_check
+    CHECK (status IN ('healthy','degraded','failing','unknown'))
+  `)
+
+  // Sync observability: duration + last HTTP status of the most recent pull.
+  await query(`ALTER TABLE sync_status ADD COLUMN IF NOT EXISTS last_duration_ms INTEGER`)
+  await query(`ALTER TABLE sync_status ADD COLUMN IF NOT EXISTS last_http_status INTEGER`)
+
+  // Slow operations: average + p99 alongside the existing p95.
+  await query(`ALTER TABLE slow_operations ADD COLUMN IF NOT EXISTS avg_ms NUMERIC NOT NULL DEFAULT 0`)
+  await query(`ALTER TABLE slow_operations ADD COLUMN IF NOT EXISTS p99 NUMERIC NOT NULL DEFAULT 0`)
 
   await query(`CREATE INDEX IF NOT EXISTS idx_accounts_created ON accounts (created_at)`)
   await query(`CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts (status)`)

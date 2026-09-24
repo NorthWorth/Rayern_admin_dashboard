@@ -160,6 +160,119 @@ async function unitChecks(): Promise<void> {
   check('5xx buckets accumulated for the errors table', buckets.length > 0 && buckets.every((b) => b.statusCode === 500), JSON.stringify(buckets.map((b) => b.statusCode)))
 }
 
+/* ------------------ Four-state health / freshness / transitions ------------ */
+
+function mkSnap(count: number, errorCount: number, p95: number, lastAt: number | null): import('./telemetry/store').WindowSnapshot {
+  const rate = count === 0 ? null : (errorCount / count) * 100
+  return {
+    count,
+    successCount: count - errorCount,
+    errorCount,
+    slowCount: 0,
+    p50Ms: count > 0 ? Math.round(p95 * 0.5) : null,
+    p95Ms: count > 0 ? p95 : null,
+    p99Ms: count > 0 ? p95 : null,
+    errorRatePct: rate === null ? null : Number(rate.toFixed(4)),
+    availabilityPct: rate === null ? null : Number((100 - rate).toFixed(4)),
+    rpm: count,
+    classes: { c2: count - errorCount, c3: 0, c4: 0, c5: errorCount },
+    lastSampleAt: lastAt,
+  }
+}
+
+async function healthUnitChecks(): Promise<void> {
+  console.log('\n[unit] four-state health: thresholds, boundaries, freshness, transitions')
+  const store = await import('./telemetry/store')
+  const now = Date.now()
+  const staleMs = 900_000
+  const TH = {
+    errorRateDegradedPct: 1,
+    errorRateFailingPct: 5,
+    p95DegradedMs: 500,
+    p95FailingMs: 2_000,
+    availabilityDegradedPct: 99,
+    availabilityFailingPct: 95,
+  }
+  const evalAt = (snap: ReturnType<typeof mkSnap>): ReturnType<typeof store.evaluateHealth> =>
+    store.evaluateHealth({ snapshot: snap, thresholds: TH, minSamples: 10, staleMs, now })
+
+  // --- Zero requests / no telemetry → unknown, never healthy ---
+  const zero = evalAt(mkSnap(0, 0, 0, now))
+  check('zero requests → unknown (no data, not healthy)', zero.status === 'unknown', `status=${zero.status}`)
+  check('zero requests → all measured fields null', zero.errorRatePct === null && zero.p95Ms === null && zero.availabilityPct === null)
+  const never = evalAt(mkSnap(0, 0, 0, null))
+  check('never-observed → unknown with freshness none', never.status === 'unknown' && never.freshness === 'none')
+
+  // --- Error-rate threshold boundaries (exactly AT a threshold crosses it) ---
+  check('error rate exactly at degraded (1%) → degraded', evalAt(mkSnap(100, 1, 100, now)).status === 'degraded')
+  check('error rate just below degraded (0.1%) → healthy', evalAt(mkSnap(1_000, 1, 100, now)).status === 'healthy')
+  check('error rate just below failing (2%) → degraded', evalAt(mkSnap(100, 2, 100, now)).status === 'degraded')
+  check('error rate exactly at failing (5%) → failing', evalAt(mkSnap(100, 5, 100, now)).status === 'failing')
+  check('zero errors with traffic → healthy', evalAt(mkSnap(100, 0, 100, now)).status === 'healthy')
+
+  // --- Latency threshold boundaries (only with minSamples) ---
+  check('p95 exactly at degraded (500ms) → degraded', evalAt(mkSnap(20, 0, 500, now)).status === 'degraded')
+  check('p95 just below degraded (499ms) → healthy', evalAt(mkSnap(20, 0, 499, now)).status === 'healthy')
+  check('p95 exactly at failing (2000ms) → failing', evalAt(mkSnap(20, 0, 2_000, now)).status === 'failing')
+  const insufficient = evalAt(mkSnap(5, 0, 5_000, now))
+  check('below minSamples → latency not reported (p95 null)', insufficient.p95Ms === null, `p95=${String(insufficient.p95Ms)}`)
+  check('below minSamples → latency ignored for status', insufficient.status === 'healthy', `status=${insufficient.status}`)
+
+  // --- Freshness: stale telemetry can never appear healthy ---
+  check('age exactly at threshold → still fresh', store.freshnessOf(now - staleMs, now, staleMs) === 'fresh')
+  check('age just past threshold → stale', store.freshnessOf(now - staleMs - 1, now, staleMs) === 'stale')
+  check('no telemetry → none', store.freshnessOf(null, now, staleMs) === 'none')
+  const staleHealth = evalAt(mkSnap(1_000, 0, 50, now - staleMs - 1))
+  check('stale telemetry → unknown (not healthy)', staleHealth.status === 'unknown', `status=${staleHealth.status}`)
+  check('stale unknown carries a staleness reason', (staleHealth.reason ?? '').includes('stale'), `reason=${staleHealth.reason}`)
+  check('stale unknown keeps real metrics + reports age', staleHealth.freshness === 'stale' && staleHealth.telemetryAgeMs !== null)
+
+  // --- Threshold reasons feed transition records ---
+  const failingHealth = evalAt(mkSnap(100, 5, 100, now))
+  check('failing reason names the metric', (failingHealth.reason ?? '').includes('error rate'), `reason=${failingHealth.reason}`)
+
+  // --- Transition deduplication rules ---
+  check('initial state is not a transition', store.shouldRecordTransition(null, 'healthy') === false)
+  check('unchanged state → no duplicate transition', store.shouldRecordTransition('healthy', 'healthy') === false)
+  check('ongoing failing → no duplicate transition', store.shouldRecordTransition('failing', 'failing') === false)
+  check('healthy → failing records a transition', store.shouldRecordTransition('healthy', 'failing') === true)
+  check('degraded → healthy (recovery) records a transition', store.shouldRecordTransition('degraded', 'healthy') === true)
+  check('healthy → unknown (stale) records a transition', store.shouldRecordTransition('healthy', 'unknown') === true)
+  check('failing → unknown records a transition', store.shouldRecordTransition('failing', 'unknown') === true)
+  check('unknown → healthy (recovery) records a transition', store.shouldRecordTransition('unknown', 'healthy') === true)
+
+  // --- Status-class distribution + rpm + operation stats (bounded) ---
+  process.env.TELEMETRY_ENABLED = 'true'
+  const before = store.serviceSnapshot('dashboard-api')
+  store.recordHttp({ method: 'GET', route: '/classes', statusCode: 200, durationMs: 5, traceId: null })
+  store.recordHttp({ method: 'GET', route: '/classes', statusCode: 304, durationMs: 3, traceId: null })
+  store.recordHttp({ method: 'GET', route: '/classes', statusCode: 404, durationMs: 4, traceId: null })
+  store.recordHttp({ method: 'GET', route: '/classes', statusCode: 503, durationMs: 7, traceId: null })
+  const after = store.serviceSnapshot('dashboard-api')
+  check('2xx class counted', after.classes.c2 - before.classes.c2 === 1, `Δc2=${after.classes.c2 - before.classes.c2}`)
+  check('3xx class counted', after.classes.c3 - before.classes.c3 === 1, `Δc3=${after.classes.c3 - before.classes.c3}`)
+  check('4xx class counted', after.classes.c4 - before.classes.c4 === 1, `Δc4=${after.classes.c4 - before.classes.c4}`)
+  check('5xx class counted', after.classes.c5 - before.classes.c5 === 1, `Δc5=${after.classes.c5 - before.classes.c5}`)
+  check('4xx does NOT inflate the server error rate', (after.errorCount ?? 0) - (before.errorCount ?? 0) === 1, `Δerr=${(after.errorCount ?? 0) - (before.errorCount ?? 0)}`)
+  check('requests-per-minute derived from live samples', after.rpm >= 4, `rpm=${after.rpm}`)
+  check('snapshot exposes success count', after.successCount === after.count - after.errorCount)
+
+  store.recordOperation({ service: 'unit-op', operation: 'unit.op', durationMs: 42, ok: true })
+  store.recordOperation({ service: 'unit-op', operation: 'unit.op', durationMs: 142, ok: true })
+  const opStat = store.operationStats().find((o) => o.service === 'unit-op')
+  check('operation stats expose avg alongside p95/p99', typeof opStat?.avgMs === 'number' && typeof opStat?.p99Ms === 'number', JSON.stringify(opStat ?? null))
+  check('operation p99 ≥ p95', (opStat?.p99Ms ?? 0) >= (opStat?.p95Ms ?? 0))
+
+  // --- Dependency health: an unobserved dependency is unknown ---
+  const resendHealth = store.computeServiceStatus('resend')
+  check('unobserved dependency (resend) → unknown, not healthy', resendHealth.status === 'unknown', `status=${resendHealth.status}`)
+  check('unobserved dependency reports freshness none', resendHealth.freshness === 'none')
+  const worst = store.worstHealth(['unknown', 'unknown'])
+  check('all-unknown rolls up to unknown', worst === 'unknown')
+  check('healthy wins over unknown in rollup', store.worstHealth(['unknown', 'healthy']) === 'healthy')
+  check('failing dominates the overall rollup', store.worstHealth(['healthy', 'degraded', 'failing']) === 'failing')
+}
+
 /* ---------------------------- Integration checks -------------------------- */
 
 async function integrationChecks(): Promise<void> {
@@ -178,6 +291,8 @@ async function integrationChecks(): Promise<void> {
     // Dead exporter on purpose: proves export failures never affect the API.
     OTEL_EXPORTER_OTLP_ENDPOINT: DEAD_OTLP,
     TELEMETRY_FLUSH_MS: '1500',
+    // Fast history rollups so the test observes service_history being written.
+    TELEMETRY_HISTORY_ROLLUP_MS: '1500',
     HEALTH_MIN_SAMPLES: '10',
     // No DATABASE_URL → embedded PGlite. No RAYERN_* → sync disabled.
   })
@@ -272,6 +387,104 @@ async function integrationChecks(): Promise<void> {
     for (const secret of SECRETS) {
       check(`Errors output contains no "${secret}"`, !errsText.includes(secret))
     }
+    const errStatusClasses = Array.isArray(errs.json) ? (errs.json as Array<{ statusClass?: string }>) : []
+    check(
+      'errors expose bounded status classes',
+      errStatusClasses.length > 0 &&
+        errStatusClasses.every((e) => ['1xx', '2xx', '3xx', '4xx', '5xx', 'n/a'].includes(e.statusClass ?? '')),
+      JSON.stringify(errStatusClasses.slice(0, 3).map((e) => e.statusClass)),
+    )
+
+    /* -------- Platform health model: freshness / dependencies / history -------- */
+    const overall = sys.json?.overall
+    check('system overall uses the four-state health model', ['healthy', 'degraded', 'failing', 'unknown'].includes(String(overall)), `overall=${String(overall)}`)
+    const svcRows: Array<{
+      name?: string
+      status?: string
+      historyKey?: string | null
+      reason?: string | null
+      freshness?: { status?: string }
+    }> = Array.isArray(sys.json?.services) ? sys.json.services : []
+    check(
+      'every service row carries freshness',
+      svcRows.length > 0 && svcRows.every((s) => ['fresh', 'stale', 'none'].includes(s.freshness?.status ?? '')),
+      JSON.stringify(svcRows.map((s) => `${s.name}:${s.freshness?.status}`)),
+    )
+    const dashRow = svcRows.find((s) => s.name === 'Dashboard API')
+    check('Dashboard API row is fresh after live traffic', dashRow?.freshness?.status === 'fresh', JSON.stringify(dashRow ?? {}))
+    check('actively observed service is not unknown', dashRow?.status !== 'unknown' && ['healthy', 'degraded', 'failing'].includes(dashRow?.status ?? ''), `status=${dashRow?.status}`)
+    check('Dashboard API row exposes history drill-down key', dashRow?.historyKey === 'dashboard-api', `key=${String(dashRow?.historyKey)}`)
+    check('service rows expose a decision reason', svcRows.every((s) => typeof s.reason === 'string'), '')
+
+    const depRows: Array<{ id?: string; status?: string; configured?: boolean; historyKey?: string | null }> =
+      Array.isArray(sys.json?.dependencies) ? sys.json.dependencies : []
+    check(
+      'only real dependencies exposed (postgresql, rayern, resend)',
+      ['dep:postgresql', 'dep:rayern-metrics', 'dep:resend'].every((id) => depRows.some((d) => d.id === id)),
+      JSON.stringify(depRows.map((d) => d.id)),
+    )
+    const rayernDep = depRows.find((d) => d.id === 'dep:rayern-metrics')
+    check(
+      'unconfigured Rayern dependency reports unknown (not healthy)',
+      rayernDep?.configured === false && rayernDep?.status === 'unknown',
+      JSON.stringify(rayernDep ?? {}),
+    )
+    check('runtime meta exposes pool pressure', typeof (sys.json?.meta as { pool?: { total?: number } } | undefined)?.pool?.total === 'number')
+
+    const hist = await req('GET', '/system/history?service=dashboard-api&range=24h', { token })
+    const histPoints: Array<{ requestCount?: number; errorRatePct?: number | null }> =
+      hist.status === 200 && Array.isArray((hist.json as { points?: unknown[] })?.points) ? (hist.json as { points: [] }).points : []
+    check('history endpoint returns full 24h series', histPoints.length >= 24 && histPoints.length <= 26, `points=${histPoints.length}`)
+    check('history rollup aggregates REAL requests', histPoints.some((p) => (p.requestCount ?? 0) > 0), `max=${Math.max(0, ...histPoints.map((p) => p.requestCount ?? 0))}`)
+    check(
+      'history buckets with no traffic report null metrics (not 0)',
+      histPoints.some((p) => p.requestCount === 0 && p.errorRatePct === null),
+      JSON.stringify(histPoints.slice(0, 3)),
+    )
+    const hist7 = await req('GET', '/system/history?service=postgres&range=7d', { token })
+    check('7d postgres history → 200 series', hist7.status === 200 && Array.isArray((hist7.json as { points?: unknown[] }).points))
+    const histBad = await req('GET', '/system/history?service=bad;DROP&range=24h', { token })
+    check('history rejects invalid service key → 4xx', histBad.status >= 400 && histBad.status < 500, `got=${histBad.status}`)
+    const histText = JSON.stringify(hist.json ?? {})
+    for (const secret of SECRETS) {
+      check(`History output contains no "${secret}"`, !histText.includes(secret))
+    }
+
+    const trans = await req('GET', '/system/transitions?range=24h', { token })
+    check('transitions endpoint → 200 array', trans.status === 200 && Array.isArray(trans.json))
+    const transText = JSON.stringify(trans.json ?? {})
+    for (const secret of SECRETS) {
+      check(`Transitions output contains no "${secret}"`, !transText.includes(secret))
+    }
+
+    /* ------------------- Observability: freshness + aggregates ------------------ */
+    const obsHealthServices: Array<{
+      service?: string
+      status?: string
+      errorCount?: number
+      successCount?: number
+      freshness?: { status?: string }
+    }> = Array.isArray(obs.json?.services) ? obs.json.services : []
+    check(
+      'observability rows carry four-state status + freshness + error/success counts',
+      obsHealthServices.length > 0 &&
+        obsHealthServices.every(
+          (s) =>
+            ['healthy', 'degraded', 'failing', 'unknown'].includes(s.status ?? '') &&
+            typeof s.errorCount === 'number' &&
+            typeof s.successCount === 'number' &&
+            ['fresh', 'stale', 'none'].includes(s.freshness?.status ?? ''),
+        ),
+      JSON.stringify(obsHealthServices.map((s) => `${s.service}:${s.status}`)),
+    )
+    const obsSlow: Array<{ avgMs?: number; p99?: number }> = Array.isArray(obs.json?.slowOperations) ? obs.json.slowOperations : []
+    check('slow operations expose avg + p99', obsSlow.length > 0 && obsSlow.every((op) => typeof op.avgMs === 'number' && typeof op.p99 === 'number'))
+    const obsTrend: Array<{ errorRatePct: number | null }> = Array.isArray(obs.json?.errorRateTrend) ? obs.json.errorRateTrend : []
+    check(
+      'error-rate trend allows null (no traffic ≠ 0%)',
+      obsTrend.length > 0 && obsTrend.every((p) => p.errorRatePct === null || typeof p.errorRatePct === 'number'),
+    )
+    check('empty trend buckets are null at least once', obsTrend.some((p) => p.errorRatePct === null), JSON.stringify(obsTrend.slice(0, 3)))
   }
 
   // Requests still succeed AFTER all of this — exporter failures never
@@ -314,12 +527,82 @@ async function integrationChecks(): Promise<void> {
   }
   child2.kill('SIGTERM')
   await waitPortFree(PORT, 10_000)
+
+  /* ------- Stale telemetry: a quiet service must become Unknown, not stay healthy ------ */
+  console.log('\n[integration] stale telemetry → Unknown / No Data (never silently healthy)')
+  const child3 = await startApi({
+    PORT: String(PORT),
+    API_PORT: String(PORT),
+    EMBEDDED_PG_PORT: '54333',
+    ADMIN_JWT_SECRET: JWT_SECRET,
+    ADMIN_EMAIL,
+    ADMIN_PASSWORD,
+    EMAIL_DRY_RUN: '1',
+    // Freshness threshold tiny on purpose: 5s without telemetry → unknown.
+    HEALTH_TELEMETRY_STALE_MS: '5000',
+    TELEMETRY_FLUSH_MS: '1000',
+  })
+  const ready3 = await waitReady()
+  check('API starts with a 5s freshness threshold', ready3)
+  if (ready3) {
+    const login3 = await req('POST', '/auth/login', { body: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD } })
+    const token3 = login3.json?.token as string | undefined
+    if (token3) {
+      // Generate healthy traffic, then let a flush persist status=healthy.
+      for (let i = 0; i < 4; i++) await req('GET', '/users/stats', { token: token3 })
+      await sleep(1_500)
+      const beforeStale = await req('GET', '/system/overview', { token: token3 })
+      const beforeRow = ((beforeStale.json?.services ?? []) as Array<{ name?: string; status?: string; freshness?: { status?: string } }>)
+        .find((s) => s.name === 'Dashboard API')
+      check(
+        'observed service starts fresh (not unknown)',
+        beforeRow?.freshness?.status === 'fresh' && beforeRow?.status !== 'unknown',
+        JSON.stringify(beforeRow ?? {}),
+      )
+
+      // Absolute silence beyond the freshness threshold.
+      await sleep(8_000)
+      const afterStale = await req('GET', '/system/overview', { token: token3 })
+      const staleRow = ((afterStale.json?.services ?? []) as Array<{ name?: string; status?: string; reason?: string; freshness?: { status?: string } }>)
+        .find((s) => s.name === 'Dashboard API')
+      check(
+        'stale service reports Unknown / No Data',
+        staleRow?.status === 'unknown',
+        `status=${String(staleRow?.status)} reason=${String(staleRow?.reason)}`,
+      )
+      check('stale service reports freshness=stale', staleRow?.freshness?.status === 'stale', JSON.stringify(staleRow?.freshness ?? {}))
+      check('stale state carries a staleness reason', (staleRow?.reason ?? '').includes('stale'), `reason=${String(staleRow?.reason)}`)
+
+      // The persisted transition proves healthy → unknown was recorded once.
+      const trans3 = await req('GET', '/system/transitions?range=24h', { token: token3 })
+      const rows3 = (Array.isArray(trans3.json) ? trans3.json : []) as Array<{
+        service?: string
+        to?: string
+        reason?: string
+        at?: string
+      }>
+      check(
+        'healthy → unknown transition recorded with staleness reason',
+        rows3.some((t) => t.service === 'dashboard-api' && t.to === 'unknown' && (t.reason ?? '').includes('stale')),
+        JSON.stringify(rows3.slice(0, 5)),
+      )
+      const uniqueTransitions = new Set(rows3.filter((t) => t.to === 'unknown').map((t) => `${t.service}:${t.to}:${(t.reason ?? '').slice(0, 10)}`))
+      check(
+        'ongoing stale condition does not duplicate transitions',
+        uniqueTransitions.size === rows3.filter((t) => t.to === 'unknown').length,
+        `unique=${uniqueTransitions.size} total=${rows3.filter((t) => t.to === 'unknown').length}`,
+      )
+    }
+  }
+  child3.kill('SIGTERM')
+  await waitPortFree(PORT, 10_000)
 }
 
 /* --------------------------------- Main ----------------------------------- */
 
 async function main(): Promise<void> {
   await unitChecks()
+  await healthUnitChecks()
   await integrationChecks()
 
   console.log(`\n${passed} passed, ${failed} failed`)

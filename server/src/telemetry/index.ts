@@ -54,8 +54,23 @@ export const telemetryMiddleware: RequestHandler = (req, res, next) => {
 }
 
 export { withSpan, routeLabel } from './instrument'
-export { computeApiHealth, computeDbHealth, runtimeSnapshot } from './store'
-export type { ComponentHealth, RuntimeSnapshot } from './store'
+export {
+  computeApiHealth,
+  computeDbHealth,
+  computeServiceStatus,
+  evaluateHealth,
+  runtimeSnapshot,
+  shouldRecordTransition,
+  staleMsFor,
+  worstHealth,
+} from './store'
+export type {
+  ComponentHealth,
+  ComponentHealthStatus,
+  RuntimeSnapshot,
+  StatusClasses,
+  TelemetryFreshness,
+} from './store'
 export { flushTelemetryOnce }
 export { sanitizeSql, sanitizeErrorMessage } from './sanitize'
 

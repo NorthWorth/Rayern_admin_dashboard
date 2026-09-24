@@ -139,6 +139,51 @@ export interface EmailStats {
   daily: Array<{ date: string; sent: number; failed: number }>
 }
 
+/* ------------------------------ Email usage ------------------------------- */
+
+/** A quota window computed from persisted individual-message rows. */
+export interface EmailUsageWindow {
+  used: number
+  limit: number
+  remaining: number
+  /** `used / limit * 100` (1 decimal) — null when the limit is 0. */
+  usedPct: number | null
+}
+
+export interface EmailUsage {
+  month: EmailUsageWindow
+  day: EmailUsageWindow
+  computedAt: string
+  /** null until a reconciliation pass has ever run. */
+  lastReconciledAt: string | null
+  limits: { monthly: number; daily: number }
+}
+
+/** Aggregate delivery info for expanded (BCC/CC-only) operations — counts only. */
+export interface EmailDeliveryInfo {
+  mode: 'expanded' | 'normal'
+  providerMessages: number
+  batches: number
+  accepted: number
+  uncertain: number
+  failed: number
+}
+
+export interface EmailMessage {
+  id: ID
+  resendId: string
+  to: string[]
+  cc: string[]
+  bcc: string[]
+  subject: string
+  bodyType: EmailBodyType
+  type: EmailType
+  status: EmailStatus
+  sentAt: string
+  /** Present on expanded operations: counts, never recipient lists. */
+  delivery?: EmailDeliveryInfo
+}
+
 export interface ComposeEmailPayload {
   from: string
   to: string[]
@@ -152,19 +197,81 @@ export interface ComposeEmailPayload {
 
 /* --------------------------------- System --------------------------------- */
 
-export type HealthStatus = 'healthy' | 'degraded' | 'failing'
+/**
+ * Four-state health model computed BY THE BACKEND from real telemetry.
+ * `unknown` = no or stale telemetry — absence of data is never `healthy`.
+ */
+export type HealthStatus = 'healthy' | 'degraded' | 'failing' | 'unknown'
+
+export type TelemetryFreshness = 'fresh' | 'stale' | 'none'
+
+export interface TelemetryFreshnessInfo {
+  /** Last time real telemetry was observed (null = never). */
+  lastTelemetryAt: string | null
+  ageMs: number | null
+  status: TelemetryFreshness
+}
+
+/** Bounded HTTP status-class distribution (2xx/3xx/4xx/5xx). */
+export interface StatusClassDistribution {
+  c2: number
+  c3: number
+  c4: number
+  c5: number
+}
 
 export interface ServiceHealth {
   id: ID
   name: string
   kind: 'api' | 'database' | 'cache' | 'queue' | 'email' | 'storage'
   status: HealthStatus
+  /** Why the backend decided this state (threshold trigger / staleness). */
+  reason: string | null
+  /** Where the row comes from: own telemetry vs. Rayern pull-sync. */
+  dataSource: 'self' | 'rayern-sync'
+  /** Rayern's reported state when staleness overrode it with `unknown`. */
+  reportedStatus: HealthStatus | null
   /** Observed availability (%). null = insufficient telemetry — never faked. */
   uptimePct30d: number | null
   /** null = not yet measured (insufficient telemetry). */
   latencyMsP50: number | null
   latencyMsP95: number | null
   lastIncidentAt: string | null
+  /** Window request metrics — null for synced rows that have no local series. */
+  requestCount: number | null
+  successCount: number | null
+  errorRatePct: number | null
+  rpm: number | null
+  slowCount: number | null
+  statusClasses: StatusClassDistribution | null
+  freshness: TelemetryFreshnessInfo
+  /** Most recent persisted health-state transition for this service. */
+  lastChange: { at: string; from: HealthStatus; to: HealthStatus; reason: string } | null
+  /** Telemetry-service key for history drill-down (null = no local history). */
+  historyKey: string | null
+}
+
+/** A real dependency of the dashboard backend (no invented ones). */
+export interface DependencyHealth {
+  id: ID
+  name: string
+  kind: 'database' | 'api' | 'email'
+  status: HealthStatus
+  reason: string | null
+  availabilityPct: number | null
+  requestCount: number | null
+  errorCount: number | null
+  errorRatePct: number | null
+  p95Ms: number | null
+  lastSuccessAt: string | null
+  lastFailureAt: string | null
+  lastObservedAt: string | null
+  freshness: TelemetryFreshnessInfo
+  configured: boolean
+  /** Bounded operational detail lines (pool pressure, pull cadence, …). */
+  detail: Array<{ label: string; value: string }>
+  /** Telemetry-service key for history drill-down. */
+  historyKey: string | null
 }
 
 export interface LatencyPercentiles {
@@ -175,25 +282,57 @@ export interface LatencyPercentiles {
   p99: number | null
 }
 
+/** Runtime/process health + the configured thresholds health is derived from. */
+export interface SystemRuntimeMeta {
+  processUptimeSec: number
+  dbLatencyMs: number
+  rssBytes: number
+  heapUsedBytes: number
+  heapTotalBytes: number
+  /** null when the runtime cannot measure it (never a fabricated 0). */
+  cpuPercent: number | null
+  eventLoopDelayP95Ms: number | null
+  pool: { total: number; idle: number; waiting: number }
+  telemetryStaleMs: number
+  healthThresholds: {
+    errorRateDegradedPct: number
+    errorRateFailingPct: number
+    latencyP95DegradedMs: number
+    latencyP95FailingMs: number
+  }
+}
+
 export interface SystemOverview {
   overall: HealthStatus
   services: ServiceHealth[]
+  dependencies: DependencyHealth[]
   requestVolume: Array<{ time: string; count: number; errors: number }>
   /** null = no requests measured in the window (rendered as "—", never 0). */
   errorRatePct: number | null
   requestCount24h: number
   latency: LatencyPercentiles
   recentFailures: RecentFailure[]
+  /** Backend-computed explanation of the overall rollup (spec §21). */
+  overallSummary: { failing: string[]; degraded: string[]; healthy: number; unknown: number }
 
   /**
    * Health of the dashboard-side Rayern pull-sync worker. The dashboard
    * OUTBOUND polls Rayern; Rayern never calls the dashboard.
    */
   sync: RayernSyncStatus
+  /**
+   * Spec §17: the metrics-PULL process as its OWN signal, separate from
+   * Rayern API health rows (a 429 means Rayern is reachable but rate-limiting
+   * the dashboard's pull — not that the API is failing).
+   */
+  metricsSync: { status: HealthStatus; reason: string; dataAgeMs: number | null }
+  meta: SystemRuntimeMeta
 }
 
 /**
  * Health of the dashboard-side Rayern pull-sync worker (spec section 12).
+ * Includes full operational observability: duration, last HTTP status, the
+ * last time valid data was STORED, and any active rate-limit window.
  */
 export interface RayernSyncStatus {
   enabled: boolean
@@ -205,12 +344,57 @@ export interface RayernSyncStatus {
   consecutiveFailures: number
   stale: boolean
   running: boolean
+  lastDurationMs: number | null
+  lastHttpStatus: number | null
+  /** Last timestamp valid aggregates were written — failed pulls never move it. */
+  dataUpdatedAt: string | null
+  intervalMs: number
+  /** Active HTTP 429 back-off window (null = not rate limited). */
+  rateLimitedUntil: string | null
+}
+
+/* ---------------------------- Health history ------------------------------ */
+
+export type HistoryRange = '24h' | '7d' | '30d'
+
+export interface ServiceHistoryPoint {
+  time: string
+  requestCount: number
+  errorCount: number
+  /** null bucket = no traffic (never rendered as a fake 0%). */
+  errorRatePct: number | null
+  availabilityPct: number | null
+  p95Ms: number | null
+}
+
+export interface ServiceHistory {
+  service: string
+  range: HistoryRange
+  points: ServiceHistoryPoint[]
+}
+
+/** A genuine health-state transition (deduplicated backend-side). */
+export interface HealthTransition {
+  id: ID
+  service: string
+  from: HealthStatus
+  to: HealthStatus
+  reason: string
+  metric: string
+  metricValue: number | null
+  at: string
 }
 
 export interface RecentFailure {
   id: ID
   service: string
+  /** Normalized route pattern (e.g. `POST /emails/send`) when known. */
+  route: string
+  /** Bounded status class ("5xx") or "error" for non-HTTP failures. */
+  statusCategory: string
   time: string
+  firstSeenAt: string
+  lastSeenAt: string
   message: string
   count: number
 }
@@ -226,6 +410,8 @@ export interface ErrorEntry {
   endpoint: string
   method: string
   statusCode: number
+  /** Bounded status class (2xx…5xx / n/a) derived from the status code. */
+  statusClass: string
   message: string
   traceId: string | null
   count: number
@@ -256,11 +442,14 @@ export interface TraceSpan {
 export interface ServiceTelemetry {
   service: string
   requestCount: number
+  errorCount: number
+  successCount: number
   errorRatePct: number
   p50: number
   p95: number
   p99: number
   status: HealthStatus
+  freshness: TelemetryFreshnessInfo
 }
 
 export interface ObservabilityOverview {
@@ -271,10 +460,13 @@ export interface ObservabilityOverview {
     service: string
     operation: string
     p95: number
+    avgMs: number
+    p99: number
     occurrences: number
     lastSeenAt: string
   }>
-  errorRateTrend: Array<{ time: string; errorRatePct: number }>
+  /** null = no traffic in the bucket (never a fabricated 0% error rate). */
+  errorRateTrend: Array<{ time: string; errorRatePct: number | null }>
 }
 
 /* -------------------------------- Audit log ------------------------------- */

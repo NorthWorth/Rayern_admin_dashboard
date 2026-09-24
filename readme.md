@@ -205,9 +205,11 @@ The dashboard's email system is independent from Rayern's automated transactiona
 
 The email composer supports To, CC, BCC (each with multiple recipients), bulk "select all recipients", email type selection, and "copy as new email" from past sends. The sender identity is enforced server-side as `Rayern <support@rayern.com.ng>`.
 
-**Recipient rule.** A send is allowed when To, CC **or** BCC contains at least one recipient; it is rejected only when all three are empty. CC-only and BCC-only sends go out exactly as composed — no To address is ever invented, so BCC stays invisible to other recipients.
+**Recipient rule.** A send is allowed when To, CC **or** BCC contains at least one recipient; it is rejected only when all three are empty.
 
-> Provider note: the installed `resend@4.8.0` SDK types `to` as a required `string | string[]` (API docs: required, max 50) and documents no empty-`to` representation. The dashboard therefore always includes the field — as an **empty array** for CC/BCC-only sends — rather than fabricating a recipient. If Resend's API rejects an empty `to`, the provider error surfaces as a normal, recorded send failure; no misleading workaround is applied.
+**BCC-only architecture (privacy-safe recipient expansion).** Resend's normal email API requires a `to` recipient, so a genuinely BCC-only payload cannot simply omit `to`. The dashboard backend therefore **expands** such operations server-side (`server/src/emailDelivery.ts`): every recipient that must not see the others receives an **individual message whose `to` is that recipient alone**. BCC recipients can never see one another; no fake To and no shared To list is ever fabricated. Normal sends with visible To recipients keep the classic single-message To/CC structure.
+
+**Resend Batch API.** Expanded messages are carried through Resend's Batch API in chunks of at most 100 individual messages per request (`RESEND_BATCH_CHUNK_SIZE`, provider max 100). 250 BCC recipients → 3 batch requests (100 + 100 + 50), each message an individual email. Every submission carries a deterministic `Idempotency-Key` (`<sendGroupId>:<kind>:<index>`), so a retried batch — timeout, lost response, frontend retry — is deduplicated by Resend instead of re-sent, and a completed logical send replays its original result locally.
 
 **Body modes.** The composer has an explicit **Plain Text | HTML** switch carried through the request as `bodyType`:
 
@@ -215,7 +217,13 @@ The email composer supports To, CC, BCC (each with multiple recipients), bulk "s
 - HTML → the body is sanitized (scripts, frames, event handlers and `javascript:` URLs stripped), normalized into a document (fragments like `<p>Hello</p>` need no boilerplate), and goes to Resend's `html` field only. A sandboxed, script-free iframe provides a browser-like preview.
 - The mode is stored with the history record, shown as metadata in the table, and preserved by "copy as new" (which never auto-sends).
 
-**Bulk sends.** Email history and the Audit Log render audience **counts** (`250 recipients` / `1 To · 5 CC · 244 BCC`) — never hundreds of addresses. Full recipient metadata stays in the database and is reachable through the audit **Details** view; email bodies are never displayed in either table.
+**Usage & quota.** Usage counts **individual recipient messages the provider accepted** — never batches, API requests, clicks, or rejected sends. One BCC-only send to 250 recipients consumes 250 emails. The authoritative counter is the `emails` table itself (one row per individual message, status `accepted`), so usage survives restarts and deployments and cannot double-count (a unique index on the provider message id makes each real message countable exactly once; retries replay). The Emails page shows this month / today against the configured limits:
+
+- `RESEND_MONTHLY_EMAIL_LIMIT` (default 3000) and `RESEND_DAILY_EMAIL_LIMIT` (default 100) — change with the Resend plan, not code.
+- Quota is enforced **server-side before any provider call**: an operation that does not fit the remaining monthly AND daily quota is rejected entirely (HTTP 402 with counts, no recipient data) — never partially sent.
+- `POST /emails/usage/reconcile` re-submits messages whose outcome was unknown (timeout/lost response) with their original idempotency keys: already-accepted messages return the same ids without re-sending. A failed reconciliation keeps last-known usage.
+
+**Bulk sends.** Email history and the Audit Log render audience **counts** (`250 recipients` / `1 To · 5 CC · 244 BCC`, plus `Provider messages: 250 · Batches: 3`) — never hundreds of addresses. An expanded (BCC) operation stays **one logical row** in history; email bodies are never displayed in either table.
 
 ## Service layer
 

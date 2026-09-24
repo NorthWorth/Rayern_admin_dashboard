@@ -10,11 +10,14 @@ import { emailsService } from '../services/emails'
 import { systemService } from '../services/system'
 import { usersService } from '../services/users'
 import { workspacesService } from '../services/workspaces'
-import { audienceLine, formatDateTime, formatNumber, titleCase } from '../lib/utils'
+import { audienceLine, formatDateTime, formatNumber, healthLabel, healthTone, titleCase } from '../lib/utils'
 import type { EmailMessage, HealthStatus } from '../lib/types'
 
-function healthTone(s: HealthStatus): 'green' | 'amber' | 'red' {
-  return s === 'healthy' ? 'green' : s === 'degraded' ? 'amber' : 'red'
+/** KPI accent — `unknown` (no data) is neutral, never a false alarm red. */
+function kpiTone(status: HealthStatus | undefined): 'default' | 'green' | 'amber' | 'red' {
+  if (!status) return 'default'
+  const tone = healthTone(status)
+  return tone === 'neutral' ? 'default' : tone
 }
 
 export function OverviewPage() {
@@ -40,8 +43,8 @@ export function OverviewPage() {
         <KpiCard label="Emails sent (30d)" value={emailStatsQ.data ? formatNumber(emailStatsQ.data.totalSent) : '—'} sub={emailStatsQ.data ? `${formatNumber(emailStatsQ.data.failed)} failed` : undefined} />
         <KpiCard
           label="System status"
-          value={systemQ.data ? titleCase(systemQ.data.overall) : '—'}
-          tone={systemQ.data?.overall === 'healthy' ? 'green' : systemQ.data?.overall === 'degraded' ? 'amber' : 'red'}
+          value={systemQ.data ? healthLabel(systemQ.data.overall) : '—'}
+          tone={kpiTone(systemQ.data?.overall)}
           sub={
             systemQ.data
               ? systemQ.data.errorRatePct !== null && systemQ.data.latency.p95 !== null
@@ -90,9 +93,9 @@ export function OverviewPage() {
               <ErrorState message={systemQ.error} onRetry={systemQ.refetch} />
             ) : systemQ.data ? (
               systemQ.data.services.slice(0, 8).map((s) => (
-                <div key={s.id} className="flex items-center justify-between text-sm">
+                <div key={s.id} className="flex items-center justify-between gap-2 text-sm">
                   <span className="truncate text-ink-700">{s.name}</span>
-                  <StatusBadge tone={healthTone(s.status)}>{titleCase(s.status)}</StatusBadge>
+                  <StatusBadge tone={healthTone(s.status)}>{healthLabel(s.status)}</StatusBadge>
                 </div>
               ))
             ) : null}

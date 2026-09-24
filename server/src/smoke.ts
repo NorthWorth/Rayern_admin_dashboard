@@ -60,6 +60,14 @@ const CHILD_ENV: NodeJS.ProcessEnv = {
   RAYERN_MONITORING_TOKEN: 'smoke-monitoring-token',
   RAYERN_SYNC_INTERVAL_MS: String(SYNC_INTERVAL_MS),
   RAYERN_SYNC_TIMEOUT_MS: String(SYNC_TIMEOUT_MS),
+  // History rollups run inside the (default 10s) flush — speed up their
+  // throttle so the smoke run observes service_history buckets being written.
+  TELEMETRY_HISTORY_ROLLUP_MS: '2000',
+  // Quota limits sized for the smoke run: the 120-recipient batch-split send
+  // must fit (tests splitting), while the 500-recipient attempt must not
+  // (tests quota rejection). Default production values stay 3000/100.
+  RESEND_MONTHLY_EMAIL_LIMIT: '3000',
+  RESEND_DAILY_EMAIL_LIMIT: '200',
   // No RESEND_API_KEY → email send uses the no-op dry-run transport.
   // No DATABASE_URL → embedded Postgres (PGlite) is used.
 }
@@ -275,6 +283,11 @@ async function main(): Promise<void> {
     consecutiveFailures: number
     status: string
     lastError: string | null
+    lastDurationMs: number | null
+    lastHttpStatus: number | null
+    dataUpdatedAt: string | null
+    rateLimitedUntil: string | null
+    intervalMs: number
   }> => {
     const res = await req('GET', '/system/overview', undefined, token)
     return ((res.json as { sync?: object }).sync ?? {}) as never
@@ -355,6 +368,51 @@ async function main(): Promise<void> {
 
     const system = await req('GET', '/system/overview', undefined, token)
     check('GET /system/overview → 200', system.status === 200 && 'overall' in (system.json as object))
+    const sysShape = system.json as {
+      overall?: string
+      services?: Array<{ status?: string; freshness?: { status?: string }; historyKey?: string | null }>
+      dependencies?: Array<{ id?: string; status?: string; historyKey?: string | null }>
+      meta?: { pool?: { total?: number }; healthThresholds?: { errorRateFailingPct?: number } }
+    }
+    check(
+      'overall uses the four-state health model',
+      ['healthy', 'degraded', 'failing', 'unknown'].includes(sysShape.overall ?? ''),
+      `overall=${sysShape.overall ?? 'missing'}`,
+    )
+    check(
+      'service rows carry four-state status + freshness',
+      (sysShape.services ?? []).length > 0 &&
+        (sysShape.services ?? []).every(
+          (s) => ['healthy', 'degraded', 'failing', 'unknown'].includes(s.status ?? '') &&
+            ['fresh', 'stale', 'none'].includes(s.freshness?.status ?? ''),
+        ),
+      JSON.stringify((sysShape.services ?? []).map((s) => `${s.status}/${s.freshness?.status}`)),
+    )
+    check(
+      'real dependencies exposed (postgresql, rayern metrics, resend)',
+      ['dep:postgresql', 'dep:rayern-metrics', 'dep:resend'].every((id) =>
+        (sysShape.dependencies ?? []).some((d) => d.id === id),
+      ),
+      JSON.stringify((sysShape.dependencies ?? []).map((d) => d.id)),
+    )
+    check(
+      'runtime meta exposes pool pressure + thresholds',
+      typeof sysShape.meta?.pool?.total === 'number' &&
+        typeof sysShape.meta?.healthThresholds?.errorRateFailingPct === 'number',
+      JSON.stringify(sysShape.meta ?? {}),
+    )
+    const historyApi = await req('GET', '/system/history?service=dashboard-api&range=24h', undefined, token)
+    check(
+      'GET /system/history → 200 bucket series',
+      historyApi.status === 200 &&
+        Array.isArray((historyApi.json as { points?: unknown[] })?.points) &&
+        ((historyApi.json as { points?: unknown[] }).points?.length ?? 0) >= 24,
+      `points=${(historyApi.json as { points?: unknown[] })?.points?.length}`,
+    )
+    const historyBad = await req('GET', '/system/history?service=bad;DROP&range=24h', undefined, token)
+    check('history rejects invalid service key → 400/404', historyBad.status >= 400 && historyBad.status < 500, `got ${historyBad.status}`)
+    const trans = await req('GET', '/system/transitions?range=24h', undefined, token)
+    check('GET /system/transitions → 200 array', trans.status === 200 && Array.isArray(trans.json))
     const errorsList = await req('GET', '/errors', undefined, token)
     check('GET /errors → 200 array', errorsList.status === 200 && Array.isArray(errorsList.json))
     const obs = await req('GET', '/observability/overview', undefined, token)
@@ -396,10 +454,23 @@ async function main(): Promise<void> {
     check('workspaces/stats serves synced aggregates', wsSynced.total === 87, `total=${String(wsSynced.total)}`)
 
     const sys2j = (await req('GET', '/system/overview', undefined, token)).json as {
-      sync?: { status?: string; lastSuccessAt?: string | null }
+      sync?: {
+        status?: string
+        lastSuccessAt?: string | null
+        lastDurationMs?: number | null
+        lastHttpStatus?: number | null
+        dataUpdatedAt?: string | null
+        rateLimitedUntil?: string | null
+        intervalMs?: number
+      }
       services?: Array<{ name?: string }>
     }
     check('system reports sync healthy after success', sys2j.sync?.status === 'healthy' && !!sys2j.sync?.lastSuccessAt)
+    check('sync exposes pull duration', typeof sys2j.sync?.lastDurationMs === 'number', `dur=${String(sys2j.sync?.lastDurationMs)}`)
+    check('sync exposes last HTTP status (200)', sys2j.sync?.lastHttpStatus === 200, `http=${String(sys2j.sync?.lastHttpStatus)}`)
+    check('sync exposes stored-data timestamp', typeof sys2j.sync?.dataUpdatedAt === 'string', `data=${String(sys2j.sync?.dataUpdatedAt)}`)
+    check('sync exposes configured interval', typeof sys2j.sync?.intervalMs === 'number')
+    check('sync exposes no active rate-limit window', sys2j.sync?.rateLimitedUntil === null || sys2j.sync?.rateLimitedUntil === undefined, `rl=${String(sys2j.sync?.rateLimitedUntil)}`)
     check('Rayern service health visible in system services', (sys2j.services ?? []).some((s) => s.name === 'Rayern API'))
 
     console.log('\n— pull-sync: privacy boundary —')
@@ -462,6 +533,7 @@ async function main(): Promise<void> {
     await awaitTick(6, token)
     const sync4 = await syncStatus(token)
     check('sync status turns failing with error info', sync4.status === 'failing' && sync4.consecutiveFailures >= 1 && !!sync4.lastError)
+    check('401 exposed as last HTTP status', sync4.lastHttpStatus === 401, `http=${String(sync4.lastHttpStatus)}`)
     const metrics4 = await req('GET', '/platform-metrics/overview', undefined, token)
     check('previously synchronized data retained during outage', (metrics4.json as { registeredAccounts?: number })?.registeredAccounts === 10)
     const errors4 = await req('GET', '/errors', undefined, token)
@@ -522,6 +594,8 @@ async function main(): Promise<void> {
       syncRL = await syncStatus(token)
     }
     check('HTTP 429 recorded as sync failure', (syncRL.lastError ?? '').includes('429'), `lastError=${syncRL.lastError ?? 'null'}`)
+    check('429 exposed as last HTTP status', syncRL.lastHttpStatus === 429, `http=${String(syncRL.lastHttpStatus)}`)
+    check('rate-limit window exposed', typeof syncRL.rateLimitedUntil === 'string', `rl=${String(syncRL.rateLimitedUntil)}`)
     const mRL = (await req('GET', '/platform-metrics/overview', undefined, token)).json as {
       registeredAccounts?: number
       dataSource?: string
@@ -797,6 +871,163 @@ async function main(): Promise<void> {
     )
     check('unknown bodyType rejected → 400', badBodyType.status === 400)
 
+    console.log('\n— emails: BCC-only expansion + Batch API architecture —')
+    // BCC-only sends must expand into individual messages (one To per
+    // recipient) via the Batch API — never a fake/shared To, never leaked
+    // visibility. Dry-run records one row per message with counts intact.
+    const bccMulti = await req(
+      'POST',
+      '/emails/send',
+      {
+        to: [], cc: [],
+        bcc: ['alice@example.com', 'bob@example.com', 'carol@example.com'],
+        subject: 'BCC expansion test',
+        message: 'Hidden recipients',
+        bodyType: 'text',
+      },
+      token,
+    )
+    const bccMultiJson = bccMulti.json as {
+      to?: string[]; bcc?: string[]; delivery?: { mode?: string; providerMessages?: number; batches?: number }
+    }
+    check('BCC-only 3 recipients → 201', bccMulti.status === 201, `status=${bccMulti.status}`)
+    check('logical composition echoed (to stays empty, no fake To)', Array.isArray(bccMultiJson.to) && bccMultiJson.to.length === 0)
+    check('BCC list echoed to the admin', bccMultiJson.bcc?.length === 3)
+    check('expansion: 3 individual provider messages (not 1 batch email)', bccMultiJson.delivery?.providerMessages === 3, JSON.stringify(bccMultiJson.delivery))
+    check('expansion: 1 batch request carried all 3', bccMultiJson.delivery?.batches === 1)
+    check('delivery mode expanded', bccMultiJson.delivery?.mode === 'expanded')
+
+    const bccUsage = await req('GET', '/emails/usage', undefined, token)
+    const usageBeforeBcc = (bccUsage.json as { month?: { used?: number } }).month?.used ?? 0
+    check('GET /emails/usage → 200 with both windows',
+      bccUsage.status === 200 &&
+      typeof (bccUsage.json as { month?: { used?: number } }).month?.used === 'number' &&
+      typeof (bccUsage.json as { day?: { used?: number } }).day?.used === 'number')
+    check(
+      'usage counts individual messages (3 BCC recipients = 3 emails)',
+      usageBeforeBcc >= 3,
+      `monthUsed=${usageBeforeBcc}`,
+    )
+
+    console.log('\n— emails: BCC batch splitting (chunk size 100) —')
+    // >100 recipients must split across multiple Batch API requests.
+    const manyBcc = Array.from({ length: 120 }, (_, i) => `bulk${i}@example.com`)
+    const bccBulk = await req(
+      'POST',
+      '/emails/send',
+      { to: [], cc: [], bcc: manyBcc, subject: 'Bulk BCC test', message: 'Batch split', bodyType: 'text' },
+      token,
+    )
+    const bccBulkJson = bccBulk.json as { delivery?: { providerMessages?: number; batches?: number } }
+    check('BCC-only 120 recipients → 201', bccBulk.status === 201, `status=${bccBulk.status}`)
+    check('120 recipients → 120 individual messages', bccBulkJson.delivery?.providerMessages === 120, JSON.stringify(bccBulkJson.delivery))
+    check('120 recipients → 2 batch requests (100 + 20)', bccBulkJson.delivery?.batches === 2, JSON.stringify(bccBulkJson.delivery))
+
+    console.log('\n— emails: CC-only + combined recipients —')
+    const ccOnlySend = await req(
+      'POST',
+      '/emails/send',
+      { to: [], cc: ['cc-one@example.com', 'cc-two@example.com'], bcc: [], subject: 'CC-only expansion', message: 'x', bodyType: 'text' },
+      token,
+    )
+    const ccOnlyJson = ccOnlySend.json as { delivery?: { providerMessages?: number; batches?: number } }
+    check('CC-only send → 201 with expanded delivery (2 messages)',
+      ccOnlySend.status === 201 && ccOnlyJson.delivery?.providerMessages === 2, JSON.stringify(ccOnlyJson.delivery))
+    const combined = await req(
+      'POST',
+      '/emails/send',
+      { to: ['to-visible@example.com'], cc: ['cc-visible@example.com'], bcc: ['hidden-1@example.com', 'hidden-2@example.com'], subject: 'Combined visibility', message: 'x', bodyType: 'text' },
+      token,
+    )
+    const combinedJson = combined.json as { delivery?: { providerMessages?: number; batches?: number } }
+    check('To+CC+BCC → 1 normal visible message + 2 hidden = 3 messages',
+      combined.status === 201 && combinedJson.delivery?.providerMessages === 3, JSON.stringify(combinedJson.delivery))
+
+    console.log('\n— emails: idempotency (retry never re-sends) —')
+    const idemKey = '11111111-1111-4111-8111-111111111111'
+    const usageBeforeIdem = ((await req('GET', '/emails/usage', undefined, token)).json as { month?: { used?: number } }).month?.used ?? 0
+    const idemFirst = await req(
+      'POST',
+      '/emails/send',
+      { to: ['idem@example.com'], subject: 'Idempotent send', message: 'once', bodyType: 'text', idempotencyKey: idemKey },
+      token,
+    )
+    const idemSecond = await req(
+      'POST',
+      '/emails/send',
+      { to: ['idem@example.com'], subject: 'Idempotent send', message: 'once', bodyType: 'text', idempotencyKey: idemKey },
+      token,
+    )
+    const idemFirstId = (idemFirst.json as { id?: string }).id
+    const idemSecondId = (idemSecond.json as { id?: string }).id
+    check('first submission → 201', idemFirst.status === 201)
+    check('retried submission with same key → 200 replay (not a new send)', idemSecond.status === 200 && (idemSecond.json as { idempotentReplay?: boolean }).idempotentReplay === true)
+    // The replay responds with the group's representative row id; either way
+    // it must identify the SAME logical operation.
+    check('replay returns the same logical send id',
+      idemSecondId === idemFirstId || idemSecondId === idemKey,
+      `first=${String(idemFirstId)} second=${String(idemSecondId)} key=${idemKey}`)
+    const usageAfterIdem = ((await req('GET', '/emails/usage', undefined, token)).json as { month?: { used?: number } }).month?.used ?? 0
+    check('retry did not double-count usage', usageAfterIdem === usageBeforeIdem + 1, `expected=${usageBeforeIdem + 1} got=${usageAfterIdem}`)
+
+    console.log('\n— emails: quota enforcement —')
+    // Shrink the monthly limit via a dedicated child? No — the running API
+    // cannot change env; instead verify the 402 path with a recipient count
+    // larger than the remaining daily/monthly capacity. With defaults
+    // (3000/100) a 500-recipient send exceeds the DAILY limit after the
+    // sends above.
+    const quotaAttempt = await req(
+      'POST',
+      '/emails/send',
+      { to: [], cc: [], bcc: Array.from({ length: 500 }, (_, i) => `quota${i}@example.com`), subject: 'Quota test', message: 'x', bodyType: 'text' },
+      token,
+    )
+    const quotaJson = quotaAttempt.json as { quota?: { requested?: number; month?: { remaining?: number }; day?: { remaining?: number } } }
+    check('operation exceeding remaining quota → 402 (rejected before sending)', quotaAttempt.status === 402, `status=${quotaAttempt.status}`)
+    check('quota error exposes requested count + both windows (counts only)',
+      quotaJson.quota?.requested === 500 &&
+      typeof quotaJson.quota?.month?.remaining === 'number' &&
+      typeof quotaJson.quota?.day?.remaining === 'number', JSON.stringify(quotaJson.quota ?? {}))
+    check('quota rejection never exposes recipient addresses', !JSON.stringify(quotaJson).includes('quota1@'))
+    const usageAfterQuota = ((await req('GET', '/emails/usage', undefined, token)).json as { month?: { used?: number } }).month?.used ?? 0
+    check('rejected operation consumed nothing', usageAfterQuota === usageAfterIdem, `before=${usageAfterIdem} after=${usageAfterQuota}`)
+
+    console.log('\n— emails: grouped history (logical operation, not 120 rows) —')
+    const groupedHistory = (await req('GET', '/emails', undefined, token)).json as Array<{
+      subject?: string
+      delivery?: { mode?: string; providerMessages?: number; batches?: number }
+    }>
+    const bulkRows = groupedHistory.filter((e) => e.subject === 'Bulk BCC test')
+    check('expanded operation collapses to ONE logical history row', bulkRows.length === 1, `rows=${bulkRows.length}`)
+    check('grouped row carries providerMessages=120 batches=2',
+      bulkRows[0]?.delivery?.providerMessages === 120 && bulkRows[0]?.delivery?.batches === 2, JSON.stringify(bulkRows[0]?.delivery ?? {}))
+    const copyBulk = (await req('GET', `/emails/${(groupedHistory.find((e) => e.subject === 'Bulk BCC test') as unknown as { id?: string })?.id ?? 'x'}/body`, undefined, token)).json as {
+      bcc?: string[]
+    }
+    check('copy-as-new restores the full hidden audience', copyBulk.bcc?.length === 120, `bcc=${copyBulk.bcc?.length}`)
+
+    console.log('\n— emails: HTML preserved through BCC expansion —')
+    const bccHtml = await req(
+      'POST',
+      '/emails/send',
+      { to: [], bcc: ['hidden-html@example.com'], subject: 'HTML BCC mode', message: '<p>rendered</p>', bodyType: 'html' },
+      token,
+    )
+    check('BCC-only HTML send → 201', bccHtml.status === 201)
+    const htmlHistory = (await req('GET', '/emails', undefined, token)).json as Array<{ subject?: string; bodyType?: string }>
+    check('expanded HTML operation keeps bodyType=html', htmlHistory.find((e) => e.subject === 'HTML BCC mode')?.bodyType === 'html')
+
+    console.log('\n— emails: visibility integrity (no BCC in any row other than its own) —')
+    // Every persisted per-recipient row stores ONLY that recipient in
+    // to_addrs with an EMPTY bcc list — the group_meta/audit path carries
+    // counts, so no row can leak another recipient's address.
+    const { query: smokeQuery } = await import('./db')
+    const leakRows = await smokeQuery<{ to_addrs: string[]; bcc_addrs: string[] }>(
+      `SELECT to_addrs, bcc_addrs FROM emails WHERE subject = 'Bulk BCC test'`,
+    )
+    check('expanded rows: one To per row', leakRows.every((r) => r.to_addrs.length === 1))
+    check('expanded rows: no BCC list stored per row (visibility sealed)', leakRows.every((r) => r.bcc_addrs.length === 0))
+
     console.log('\n— audit trail —')
     const auditAfter = await req('GET', '/audit', undefined, token)
     const events = auditAfter.json as Array<{ action?: string }>
@@ -815,6 +1046,73 @@ async function main(): Promise<void> {
     check(
       'audit email.sent metadata never contains recipient addresses (incl. bulk sends)',
       emailEvents.every((e) => !JSON.stringify(e.metadata ?? {}).includes('@example.com')),
+    )
+
+    console.log('\n— platform health: history rollup + transitions + freshness —')
+    // By now several telemetry flushes have run (rollup throttle = 2s), so the
+    // hourly service_history buckets must contain real aggregated requests.
+    const histFinal = (await req('GET', '/system/history?service=dashboard-api&range=24h', undefined, token)).json as {
+      points?: Array<{ requestCount?: number; errorRatePct?: number | null; p95Ms?: number | null }>
+    }
+    check(
+      'service_history rollup aggregates real requests',
+      (histFinal.points ?? []).some((p) => (p.requestCount ?? 0) > 0),
+      `max=${Math.max(0, ...(histFinal.points ?? []).map((p) => p.requestCount ?? 0))}`,
+    )
+    check(
+      'history buckets without traffic report null metrics (not 0)',
+      (histFinal.points ?? []).some((p) => p.requestCount === 0 && p.errorRatePct === null),
+      JSON.stringify((histFinal.points ?? []).slice(0, 3)),
+    )
+    const histDb = await req('GET', '/system/history?service=postgres&range=7d', undefined, token)
+    check('postgres history drill-down → 200', histDb.status === 200 && Array.isArray((histDb.json as { points?: unknown[] }).points))
+    const transFinal = (await req('GET', '/system/transitions?range=24h', undefined, token)).json as Array<{
+      from?: string
+      to?: string
+      reason?: string
+    }>
+    check(
+      'health transitions use four-state statuses when present',
+      transFinal.every((t) => ['healthy', 'degraded', 'failing', 'unknown'].includes(t.from ?? '')),
+      JSON.stringify(transFinal.slice(0, 3)),
+    )
+    const sysFinal = (await req('GET', '/system/overview', undefined, token)).json as {
+      services?: Array<{ name?: string; status?: string; freshness?: { status?: string } }>
+    }
+    const dashRow = (sysFinal.services ?? []).find((s) => s.name === 'Dashboard API')
+    check(
+      'actively observed service is fresh (cannot be silently stale)',
+      dashRow?.freshness?.status === 'fresh' && ['healthy', 'degraded', 'failing'].includes(dashRow?.status ?? ''),
+      JSON.stringify(dashRow ?? {}),
+    )
+    const obsFinal = (await req('GET', '/observability/overview', undefined, token)).json as {
+      services?: Array<{ service?: string; status?: string; errorCount?: number; freshness?: { status?: string } }>
+      slowOperations?: Array<{ avgMs?: number; p99?: number }>
+      errorRateTrend?: Array<{ errorRatePct: number | null }>
+    }
+    check(
+      'observability services carry four-state status + freshness + errorCount',
+      (obsFinal.services ?? []).length > 0 &&
+        (obsFinal.services ?? []).every(
+          (s) => ['healthy', 'degraded', 'failing', 'unknown'].includes(s.status ?? '') &&
+            typeof s.errorCount === 'number' &&
+            ['fresh', 'stale', 'none'].includes(s.freshness?.status ?? ''),
+        ),
+      JSON.stringify((obsFinal.services ?? []).map((s) => `${s.service}:${s.status}`)),
+    )
+    check(
+      'slow operations expose avg + p99 alongside p95',
+      (obsFinal.slowOperations ?? []).every((op) => typeof op.avgMs === 'number' && typeof op.p99 === 'number'),
+    )
+    check(
+      'error-rate trend allows null buckets (no traffic ≠ 0%)',
+      (obsFinal.errorRateTrend ?? []).every((p) => p.errorRatePct === null || typeof p.errorRatePct === 'number'),
+    )
+    const errsFinal = (await req('GET', '/errors', undefined, token)).json as Array<{ statusClass?: string }>
+    check(
+      'errors expose bounded status classes',
+      errsFinal.every((e) => ['1xx', '2xx', '3xx', '4xx', '5xx', 'n/a'].includes(e.statusClass ?? '')),
+      JSON.stringify(errsFinal.slice(0, 3).map((e) => e.statusClass)),
     )
 
     console.log('\n— sync schedule: startup log + 30-minute default —')

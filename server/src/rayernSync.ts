@@ -151,15 +151,24 @@ interface SyncStatusRow {
   last_error: string | null
   consecutive_failures: number
   enabled: boolean
+  last_duration_ms: number | null
+  last_http_status: number | null
 }
 
 async function readSyncStatus(): Promise<SyncStatusRow | null> {
   const rows = await query<SyncStatusRow>(
-    `SELECT last_attempt_at, last_success_at, last_failure_at, last_error, consecutive_failures, enabled
+    `SELECT last_attempt_at, last_success_at, last_failure_at, last_error, consecutive_failures, enabled,
+            last_duration_ms, last_http_status
      FROM sync_status WHERE id = 1`,
   )
   return rows[0] ?? null
 }
+
+/** Last observed Rayern HTTP status for the most recent attempt (fallback for
+ * reads before the first persisted flush). Only set when an actual HTTP
+ * response was received — null means transport failure/timeout. A validation
+ * failure follows HTTP 200 and correctly keeps 200. */
+let lastHttpStatus: number | null = null
 
 async function markAttempt(): Promise<void> {
   await query(
@@ -169,23 +178,27 @@ async function markAttempt(): Promise<void> {
   )
 }
 
-async function markSuccess(sections: string[]): Promise<void> {
+async function markSuccess(sections: string[], durationMs: number, httpStatus: number | null): Promise<void> {
   await query(
     `UPDATE sync_status
      SET last_success_at = now(), last_failure_at = NULL, last_error = NULL,
-         consecutive_failures = 0, updated_at = now()
+         consecutive_failures = 0, updated_at = now(),
+         last_duration_ms = $1, last_http_status = COALESCE($2, last_http_status)
      WHERE id = 1`,
+    [Math.round(durationMs), httpStatus],
   )
   await recordAudit('rayern-sync', 'system', 'sync.completed', 'rayern', { sections: sections.join(', ') })
 }
 
-async function markFailure(error: string): Promise<void> {
+async function markFailure(error: string, durationMs: number | null, httpStatus: number | null): Promise<void> {
   await query(
     `UPDATE sync_status
      SET last_failure_at = now(), last_error = $1,
-         consecutive_failures = consecutive_failures + 1, updated_at = now()
+         consecutive_failures = consecutive_failures + 1, updated_at = now(),
+         last_duration_ms = COALESCE($2, last_duration_ms),
+         last_http_status = COALESCE($3, last_http_status)
      WHERE id = 1`,
-    [error.slice(0, 500)],
+    [error.slice(0, 500), durationMs === null ? null : Math.round(durationMs), httpStatus],
   )
 }
 
@@ -322,8 +335,13 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
   }
 
   running = true
+  // Observability: duration + HTTP status of THIS attempt (null until a
+  // response is received). Used for sync metrics in the System view.
+  let attemptDurationMs: number | null = null
+  let attemptHttpStatus: number | null = null
   try {
     await markAttempt()
+    const pullStartedAt = Date.now()
 
     // Timeout guard: never let a hanging Rayern hang the worker.
     const controller = new AbortController()
@@ -364,6 +382,9 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
     } finally {
       clearTimeout(timer)
     }
+    attemptDurationMs = Date.now() - pullStartedAt
+    attemptHttpStatus = res.status
+    lastHttpStatus = res.status
 
     if (!res.ok) {
       if (res.status === 429) {
@@ -429,7 +450,7 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
     console.log(
       `[dashboard-sync] Rayern metrics persisted: totalAccounts=${parsed.data.accounts ? parsed.data.accounts.totalAccounts : 'n/a'} sections=${sections.join(',') || 'none'}`,
     )
-    await markSuccess(sections)
+    await markSuccess(sections, attemptDurationMs ?? Date.now() - pullStartedAt, attemptHttpStatus)
     return { ok: true, sections }
   } catch (err) {
     const message =
@@ -439,7 +460,7 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
           : err.message
         : 'Unknown synchronization error'
     try {
-      await markFailure(message)
+      await markFailure(message, attemptDurationMs, attemptHttpStatus)
       const status = typeof err === 'object' && err !== null && 'status' in err ? Number((err as { status?: number }).status) : 0
       await recordSyncError(message, Number.isFinite(status) ? status : 0)
       await recordAudit('rayern-sync', 'system', 'sync.failed', 'rayern', { error: message.slice(0, 200) })
@@ -520,7 +541,12 @@ export function startSyncWorker(): void {
   setInterval(() => void tracedSync('scheduled'), config.rayern.intervalMs).unref()
 }
 
-/** Shape returned by the /system overview for the sync-status card. */
+/**
+ * Shape returned by the /system overview for the sync-status card.
+ * Includes full operational sync observability: duration, last HTTP status,
+ * the timestamp of the last SUCCESSFULLY STORED data (distinct from the last
+ * attempt — a failed attempt never moves it), and any active rate-limit window.
+ */
 export async function getSyncStatus(): Promise<{
   enabled: boolean
   lastAttemptAt: string | null
@@ -530,12 +556,30 @@ export async function getSyncStatus(): Promise<{
   consecutiveFailures: number
   stale: boolean
   running: boolean
+  lastDurationMs: number | null
+  lastHttpStatus: number | null
+  dataUpdatedAt: string | null
+  intervalMs: number
+  rateLimitedUntil: string | null
 }> {
   let row: SyncStatusRow | null = null
   try {
     row = await readSyncStatus()
   } catch {
     row = null
+  }
+  // Last timestamp at which valid aggregate data was actually WRITTEN — a
+  // failed sync (401/429/timeout/validation) never advances it, so "data age"
+  // honestly reflects the last known good state.
+  let dataUpdatedAt: string | null = null
+  try {
+    const rows = await query<{ updated_at: Date }>(
+      `SELECT max(updated_at) AS updated_at FROM rayern_sync_state`,
+    )
+    const at = rows[0]?.updated_at
+    if (at instanceof Date && !Number.isNaN(at.getTime())) dataUpdatedAt = at.toISOString()
+  } catch {
+    dataUpdatedAt = null
   }
   const lastSuccessAt = row?.last_success_at?.toISOString() ?? null
   const stale =
@@ -550,5 +594,10 @@ export async function getSyncStatus(): Promise<{
     consecutiveFailures: row?.consecutive_failures ?? 0,
     stale,
     running,
+    lastDurationMs: row?.last_duration_ms ?? null,
+    lastHttpStatus: row?.last_http_status ?? lastHttpStatus,
+    dataUpdatedAt,
+    intervalMs: config.rayern.intervalMs,
+    rateLimitedUntil: rateLimitedUntil > Date.now() ? new Date(rateLimitedUntil).toISOString() : null,
   }
 }
