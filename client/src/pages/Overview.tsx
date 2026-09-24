@@ -4,6 +4,7 @@ import { KpiCard } from '../components/KpiCard'
 import { LoadingBlock, ErrorState } from '../components/ui/states'
 import { StatusBadge } from '../components/ui/Badge'
 import { TrendLineChart } from '../components/charts'
+import { Collapser } from '../components/Collapser'
 import { useQuery } from '../hooks/useQuery'
 import { platformMetricsService } from '../services/platformMetrics'
 import { emailsService } from '../services/emails'
@@ -29,7 +30,6 @@ export function OverviewPage() {
   const systemQ = useQuery(() => systemService.overview())
 
   const emails = emailsQ.data ?? []
-  const recentEmails = emails.slice(0, 6)
   const registrations = (metricsQ.data?.registrationsTrend ?? []).slice(-30)
 
   return (
@@ -92,12 +92,18 @@ export function OverviewPage() {
             ) : systemQ.error ? (
               <ErrorState message={systemQ.error} onRetry={systemQ.refetch} />
             ) : systemQ.data ? (
-              systemQ.data.services.slice(0, 8).map((s) => (
-                <div key={s.id} className="flex items-center justify-between gap-2 text-sm">
-                  <span className="truncate text-ink-700">{s.name}</span>
-                  <StatusBadge tone={healthTone(s.status)}>{healthLabel(s.status)}</StatusBadge>
-                </div>
-              ))
+              <Collapser total={systemQ.data.services.length} label="services">
+                {(visibleCount) => (
+                  <>
+                    {systemQ.data!.services.slice(0, visibleCount).map((s) => (
+                      <div key={s.id} className="flex items-center justify-between gap-2 text-sm">
+                        <span className="truncate text-ink-700">{s.name}</span>
+                        <StatusBadge tone={healthTone(s.status)}>{healthLabel(s.status)}</StatusBadge>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </Collapser>
             ) : null}
           </CardBody>
         </Card>
@@ -116,9 +122,11 @@ export function OverviewPage() {
           ) : emailsQ.error ? (
             <ErrorState message={emailsQ.error} onRetry={emailsQ.refetch} />
           ) : (
+            <Collapser total={emails.length} label="emails">
+              {(visibleCount) => (
             <table className="w-full text-sm">
               <tbody>
-                {recentEmails.map((e: EmailMessage) => (
+                {emails.slice(0, visibleCount).map((e: EmailMessage) => (
                   <tr key={e.id} className="border-b border-ink-100 last:border-0">
                     <td className="max-w-0 px-4 py-2.5">
                       <p className="truncate font-medium text-ink-800">{e.subject}</p>
@@ -131,6 +139,8 @@ export function OverviewPage() {
                 ))}
               </tbody>
             </table>
+              )}
+            </Collapser>
           )}
         </Card>
 

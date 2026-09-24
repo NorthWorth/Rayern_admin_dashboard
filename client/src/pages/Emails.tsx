@@ -8,6 +8,7 @@ import { TokenInput } from '../components/ui/TokenInput'
 import { Badge, StatusBadge } from '../components/ui/Badge'
 import { EmptyState, ErrorState, LoadingBlock } from '../components/ui/states'
 import { VolumeBarChart } from '../components/charts'
+import { Collapser } from '../components/Collapser'
 import { useToast } from '../components/ui/Toast'
 import { useQuery } from '../hooks/useQuery'
 import { emailsService } from '../services/emails'
@@ -192,6 +193,8 @@ export function EmailsPage() {
         ) : emails.length === 0 ? (
           <EmptyState title="No emails yet" description="Emails sent through the dashboard backend will appear here." />
         ) : (
+          <Collapser total={emails.length} label="emails">
+            {(visibleCount) => (
           <>
             {/* Desktop: audience rendered as counts — never hundreds of addresses. */}
             <div className="hidden overflow-x-auto md:block">
@@ -208,7 +211,7 @@ export function EmailsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {emails.map((e: EmailMessage) => {
+                  {emails.slice(0, visibleCount).map((e: EmailMessage) => {
                     const a = audienceSummary(e.to, e.cc, e.bcc)
                     return (
                       <tr key={e.id} className="border-b border-ink-100 last:border-0 hover:bg-ink-50/70 group">
@@ -251,7 +254,7 @@ export function EmailsPage() {
 
             {/* Mobile: compact card list — no wide table, no page-wide scrolling. */}
             <ul className="divide-y divide-ink-100 md:hidden">
-              {emails.map((e: EmailMessage) => {
+              {emails.slice(0, visibleCount).map((e: EmailMessage) => {
                 const a = audienceSummary(e.to, e.cc, e.bcc)
                 return (
                   <li key={e.id} className="space-y-1.5 px-4 py-3">
@@ -284,6 +287,8 @@ export function EmailsPage() {
               })}
             </ul>
           </>
+            )}
+          </Collapser>
         )}
       </Card>
 

@@ -4,6 +4,7 @@ import { KpiCard } from '../components/KpiCard'
 import { StatusBadge } from '../components/ui/Badge'
 import { LoadingBlock, EmptyState, ErrorState } from '../components/ui/states'
 import { TrendLineChart, VolumeBarChart } from '../components/charts'
+import { Collapser } from '../components/Collapser'
 import { systemService } from '../services/system'
 import { useQuery } from '../hooks/useQuery'
 import {
@@ -108,6 +109,8 @@ export function SystemPage() {
           <ErrorState message={q.error} onRetry={q.refetch} />
         ) : q.data ? (
           <>
+            <Collapser total={q.data.services.length} label="services">
+              {(visibleCount) => (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -123,7 +126,7 @@ export function SystemPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {q.data.services.map((s) => (
+                  {q.data!.services.slice(0, visibleCount).map((s) => (
                     <ServiceRow
                       key={s.id}
                       service={s}
@@ -134,6 +137,8 @@ export function SystemPage() {
                 </tbody>
               </table>
             </div>
+              )}
+            </Collapser>
 
             {drill ? (
               <div className="border-t border-ink-200 bg-ink-50/50 px-4 py-4">
@@ -200,6 +205,8 @@ export function SystemPage() {
         ) : q.error ? (
           <ErrorState message={q.error} onRetry={q.refetch} />
         ) : q.data ? (
+          <Collapser total={q.data.dependencies.length} label="dependencies">
+            {(visibleCount) => (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -215,7 +222,7 @@ export function SystemPage() {
                 </tr>
               </thead>
               <tbody>
-                {q.data.dependencies.map((d) => {
+                {q.data!.dependencies.slice(0, visibleCount).map((d) => {
                   const active = drill?.key === d.historyKey
                   return (
                     <tr
@@ -262,6 +269,8 @@ export function SystemPage() {
               </tbody>
             </table>
           </div>
+            )}
+          </Collapser>
         ) : null}
       </Card>
 
@@ -348,8 +357,10 @@ export function SystemPage() {
             description="Transitions appear when a service crosses a configured health threshold, recovers, or runs out of fresh telemetry."
           />
         ) : (
+          <Collapser total={(transitionsQ.data ?? []).length} label="transitions">
+            {(visibleCount) => (
           <ul className="divide-y divide-ink-100">
-            {(transitionsQ.data ?? []).map((t) => (
+            {(transitionsQ.data ?? []).slice(0, visibleCount).map((t) => (
               <li key={t.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 text-sm">
                 <span className="min-w-[9rem] font-medium text-ink-900">{t.service}</span>
                 <span className="flex items-center gap-1.5">
@@ -367,6 +378,8 @@ export function SystemPage() {
               </li>
             ))}
           </ul>
+            )}
+          </Collapser>
         )}
       </Card>
 
@@ -383,8 +396,10 @@ export function SystemPage() {
           q.data.recentFailures.length === 0 ? (
             <EmptyState title="No failures recorded" description="High-severity errors and 5xx responses will appear here." />
           ) : (
+          <Collapser total={q.data!.recentFailures.length} label="failures">
+            {(visibleCount) => (
           <ul className="divide-y divide-ink-100">
-            {q.data.recentFailures.map((f) => (
+            {q.data!.recentFailures.slice(0, visibleCount).map((f) => (
               <li key={f.id} className="flex flex-wrap items-start justify-between gap-x-4 gap-y-1 px-4 py-3">
                 <div className="min-w-0">
                   <p className="text-sm font-medium text-ink-900">{f.service}</p>
@@ -404,6 +419,8 @@ export function SystemPage() {
               </li>
             ))}
           </ul>
+            )}
+          </Collapser>
           )
         ) : null}
       </Card>

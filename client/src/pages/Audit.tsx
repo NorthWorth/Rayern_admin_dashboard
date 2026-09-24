@@ -5,6 +5,7 @@ import { Badge } from '../components/ui/Badge'
 import { Select } from '../components/ui/Input'
 import { Modal } from '../components/ui/Modal'
 import { EmptyState, ErrorState, LoadingBlock } from '../components/ui/states'
+import { Collapser } from '../components/Collapser'
 import { auditService } from '../services/audit'
 import { useDebouncedValue } from '../hooks/useDebouncedValue'
 import { useQuery } from '../hooks/useQuery'
@@ -168,6 +169,8 @@ export function AuditPage() {
         ) : events.length === 0 ? (
           <EmptyState title="No audit events" description="Adjust the search or actor filter." />
         ) : (
+          <Collapser total={events.length} label="events">
+            {(visibleCount) => (
           <>
             {/* Desktop: compact rows — metadata is aggregated, never stacked. */}
             <div className="hidden overflow-x-auto md:block">
@@ -182,7 +185,7 @@ export function AuditPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {events.map((ev: AuditEvent) => {
+                  {events.slice(0, visibleCount).map((ev: AuditEvent) => {
                     const view = summarizeMetadata(ev.metadata)
                     return (
                       <tr key={ev.id} className="border-b border-ink-100 last:border-0 hover:bg-ink-50/70">
@@ -220,7 +223,7 @@ export function AuditPage() {
 
             {/* Mobile: compact cards — no stacked addresses, no wide table. */}
             <ul className="divide-y divide-ink-100 md:hidden">
-              {events.map((ev: AuditEvent) => {
+              {events.slice(0, visibleCount).map((ev: AuditEvent) => {
                 const view = summarizeMetadata(ev.metadata)
                 return (
                   <li key={ev.id} className="space-y-1.5 px-4 py-3">
@@ -245,6 +248,8 @@ export function AuditPage() {
               })}
             </ul>
           </>
+            )}
+          </Collapser>
         )}
       </Card>
 
