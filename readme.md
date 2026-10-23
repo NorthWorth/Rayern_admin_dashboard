@@ -239,6 +239,7 @@ All API communication lives in `client/src/services/` — no `fetch` calls in co
 | `errorsService`          | `/errors`                                        |
 | `observabilityService`   | `/observability/overview`                        |
 | `auditService`           | `/audit`                                         |
+| `marketingService`       | `/marketing/metrics`, `/marketing/directory`, `/marketing/consent` (GET + `PATCH /:accountId`), `POST /marketing/campaigns/preview`, `POST /marketing/campaigns/send` |
 | `session / login`        | `POST /auth/login`                              |
 
 ## Telemetry (OpenTelemetry)

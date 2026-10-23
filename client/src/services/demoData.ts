@@ -13,7 +13,10 @@
 
 import type {
   AuditEvent,
+  CampaignRecord,
+  ConsentStatus,
   DependencyHealth,
+  DirectoryEntry,
   EmailMessage,
   EmailStats,
   EmailType,
@@ -22,6 +25,7 @@ import type {
   ErrorSeverity,
   HealthTransition,
   HistoryRange,
+  MarketingMetrics,
   ObservabilityOverview,
   PlatformMetricsOverview,
   RecentFailure,
@@ -626,4 +630,68 @@ export function buildAuditEvents(): AuditEvent[] {
       metadata: meta,
     }
   })
+}
+
+/* -------------------------------- Marketing ------------------------------- */
+
+/**
+ * Demo consent distribution over the demo accounts: every 10th account has
+ * opted out, ~30% opted in, the rest unknown — mirrors the opt-in-only model
+ * of the real backend (no consent record = never mailable).
+ */
+export function buildMarketingDirectory(users: User[]): DirectoryEntry[] {
+  return users.map((u) => {
+    const roll = Math.floor(rand() * 10)
+    const consent: ConsentStatus = roll < 3 ? 'opted_in' : roll < 4 ? 'opted_out' : 'unknown'
+    return {
+      ...u,
+      consent,
+      consentUpdatedAt: consent === 'unknown' ? null : u.createdAt,
+    }
+  })
+}
+
+/** Aggregate-only marketing KPIs + a short demo campaign history. */
+export function buildMarketingMetrics(directory: DirectoryEntry[]): MarketingMetrics {
+  const optedIn = directory.filter((d) => d.consent === 'opted_in').length
+  const optedOut = directory.filter((d) => d.consent === 'opted_out').length
+  const unknown = directory.length - optedIn - optedOut
+  const mailable = directory.filter((d) => d.consent === 'opted_in' && d.status === 'active').length
+
+  const recentCampaigns: CampaignRecord[] = [
+    {
+      id: 'cmp_002',
+      subject: 'Platform update: faster exports',
+      type: 'update',
+      bodyType: 'html',
+      audienceCount: Math.min(mailable, 24),
+      providerMessages: Math.min(mailable, 24),
+      status: 'sent',
+      sentBy: 'admin@rayern.com.ng',
+      sentAt: minutesAgo(60 * 26),
+    },
+    {
+      id: 'cmp_001',
+      subject: 'Welcome to Rayern — getting started',
+      type: 'announcement',
+      bodyType: 'text',
+      audienceCount: 18,
+      providerMessages: 18,
+      status: 'sent',
+      sentBy: 'admin@rayern.com.ng',
+      sentAt: minutesAgo(60 * 24 * 6),
+    },
+  ]
+
+  return {
+    consent: { optedIn, optedOut, unknown },
+    mailable,
+    campaigns: {
+      total: recentCampaigns.length,
+      sent30d: recentCampaigns.length,
+      recipients30d: recentCampaigns.reduce((s, c) => s + c.audienceCount, 0),
+      lastSentAt: recentCampaigns[0]?.sentAt ?? null,
+    },
+    recentCampaigns,
+  }
 }

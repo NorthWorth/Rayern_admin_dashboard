@@ -25,6 +25,7 @@ import systemRoutes from './routes/system'
 import errorsRoutes from './routes/errors'
 import observabilityRoutes from './routes/observability'
 import auditRoutes from './routes/audit'
+import marketingRoutes from './routes/marketing'
 import { startSyncWorker } from './rayernSync'
 import { initTelemetry, telemetryMiddleware } from './telemetry'
 
@@ -114,6 +115,9 @@ app.use('/system', requireAdmin, systemRoutes)
 app.use('/errors', requireAdmin, errorsRoutes)
 app.use('/observability', requireAdmin, observabilityRoutes)
 app.use('/audit', requireAdmin, auditRoutes)
+// Marketing (consent-gated campaigns) — same root-mounted, no-prefix
+// convention as every other route group in this API.
+app.use('/marketing', requireAdmin, marketingRoutes)
 
 // NOTE: Rayern never calls this API. Aggregate Rayern data arrives via the
 // dashboard-side pull-sync worker (rayernSync.ts), which outbound-GETs the

@@ -5,6 +5,7 @@ import { UsersPage } from './pages/Users'
 import { WorkspacesPage } from './pages/Workspaces'
 import { MetricsPage } from './pages/Metrics'
 import { EmailsPage } from './pages/Emails'
+import { MarketingPage } from './pages/Marketing'
 import { SystemPage } from './pages/System'
 import { ErrorsPage } from './pages/Errors'
 import { ObservabilityPage } from './pages/Observability'
@@ -36,6 +37,7 @@ const NAV: Array<{ section: string; items: NavItem[] }> = [
     section: 'Operations',
     items: [
       { to: '/emails', label: 'Send Email', icon: 'mail' },
+      { to: '/marketing', label: 'Marketing', icon: 'megaphone' },
       { to: '/system', label: 'System', icon: 'activity' },
       { to: '/errors', label: 'Errors', icon: 'warning' },
       { to: '/observability', label: 'Observability', icon: 'telescope' },
@@ -75,6 +77,8 @@ function NavIcon({ name }: { name: string }) {
       return <svg {...common}><circle cx="12" cy="12" r="3" /><path d="M12 2v4" /><path d="M12 18v4" /><path d="M2 12h4" /><path d="M18 12h4" /></svg>
     case 'list':
       return <svg {...common}><path d="M8 6h13" /><path d="M8 12h13" /><path d="M8 18h13" /><circle cx="4" cy="6" r="1" fill="currentColor" stroke="none" /><circle cx="4" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="4" cy="18" r="1" fill="currentColor" stroke="none" /></svg>
+    case 'megaphone':
+      return <svg {...common}><path d="M3 11v2a1 1 0 001 1h2l5 4V6L6 10H4a1 1 0 00-1 1z" /><path d="M15 8.5a4 4 0 010 7" /><path d="M17.5 6a7.5 7.5 0 010 12" /></svg>
     default:
       return <svg {...common}><circle cx="12" cy="12" r="9" /></svg>
   }
@@ -86,6 +90,7 @@ const pageTitles: Record<string, { title: string; sub: string }> = {
   '/workspaces': { title: 'Workspaces', sub: 'Aggregate workspace registrations' },
   '/metrics': { title: 'Platform Metrics', sub: 'Privacy-safe aggregate platform statistics' },
   '/emails': { title: 'Emails', sub: 'Admin-sent email history and composer' },
+  '/marketing': { title: 'Marketing', sub: 'Consent-gated campaigns — opt-in audiences only' },
   '/system': { title: 'System', sub: 'API, infrastructure and service health' },
   '/errors': { title: 'Errors', sub: 'Recent failures across services' },
   '/observability': { title: 'Observability', sub: 'Traces, latency and service performance' },
@@ -372,6 +377,7 @@ function Shell({ onSignOut }: { onSignOut: () => void }) {
             <Route path="/workspaces" element={<WorkspacesPage />} />
             <Route path="/metrics" element={<MetricsPage />} />
             <Route path="/emails" element={<EmailsPage />} />
+            <Route path="/marketing" element={<MarketingPage />} />
             <Route path="/system" element={<SystemPage />} />
             <Route path="/errors" element={<ErrorsPage />} />
             <Route path="/observability" element={<ObservabilityPage />} />

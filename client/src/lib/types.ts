@@ -488,6 +488,111 @@ export interface AuditFilters {
   actorKind?: AuditActorKind | 'all'
 }
 
+/* -------------------------------- Marketing ------------------------------- */
+
+/**
+ * Marketing consent is administrative metadata on the account record.
+ * `unknown` (no consent record) is NEVER mailable — campaigns only ever
+ * reach accounts with an explicit `opted_in` decision (opt-in only).
+ */
+export type ConsentStatus = 'opted_in' | 'opted_out' | 'unknown'
+
+/** Account directory row with its consent state (same data boundary as User). */
+export interface DirectoryEntry {
+  id: ID
+  name: string
+  email: string
+  verification: VerificationStatus
+  status: AccountStatus
+  createdAt: string
+  consent: ConsentStatus
+  consentUpdatedAt: string | null
+}
+
+export interface DirectoryFilters {
+  search?: string
+  consent?: ConsentStatus | 'all'
+}
+export interface ConsentSummary {
+  optedIn: number
+  optedOut: number
+  unknown: number
+  mailable: number
+  total: number
+}
+
+/** Live consent-gated audience counts for a campaign. */
+export interface CampaignAudience {
+  mailable: number
+  optedOut: number
+  unknown: number
+}
+
+export interface CampaignRecord {
+  id: ID
+  subject: string
+  type: EmailType
+  bodyType: EmailBodyType
+  audienceCount: number
+  providerMessages: number
+  status: 'sent' | 'queued'
+  sentBy: string
+  sentAt: string
+}
+
+export interface MarketingMetrics {
+  consent: Pick<ConsentSummary, 'optedIn' | 'optedOut' | 'unknown'>
+  mailable: number
+  campaigns: {
+    total: number
+    sent30d: number
+    recipients30d: number
+    lastSentAt: string | null
+  }
+  recentCampaigns: CampaignRecord[]
+}
+
+/** Server-computed preview: the sanitized body + live audience counts. */
+export interface CampaignPreview {
+  subject: string
+  bodyType: EmailBodyType
+  type: EmailType
+  from: string
+  body: string
+  /** Full document for sandboxed preview (html mode only, null for text). */
+  wrappedHtml: string | null
+  audience: CampaignAudience
+}
+
+export interface CampaignSendResult {
+  id: ID
+  subject: string
+  bodyType: EmailBodyType
+  type: EmailType
+  from: string
+  audienceCount: number
+  status: 'sent' | 'queued'
+  sentAt: string
+  /** True when a retried request replayed its original send. */
+  idempotentReplay?: boolean
+  /** Counts only — never recipient lists. */
+  delivery: {
+    mode: string
+    providerMessages: number
+    batches: number
+    accepted: number
+    uncertain: number
+    failed: number
+  }
+}
+
+export interface CampaignComposePayload {
+  subject: string
+  message: string
+  bodyType: EmailBodyType
+  type: EmailType
+}
+
 /* --------------------------------- Auth ----------------------------------- */
 
 export interface AdminOperator {

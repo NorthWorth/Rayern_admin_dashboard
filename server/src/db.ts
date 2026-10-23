@@ -227,6 +227,43 @@ export async function initDb(): Promise<void> {
   // cheap (the existing sent_at index covers the ordering path).
   await query(`CREATE INDEX IF NOT EXISTS idx_emails_status_sent ON emails (status, sent_at)`)
 
+  /* ------------------------------ Marketing -------------------------------- */
+  // Consent is administrative marketing metadata on the account record
+  // (opt-in / opt-out flag) — no workspace linkage, no customer content.
+  // ABSENCE OF A ROW MEANS 'unknown' (never mailable): consent is opt-in
+  // only, so a user can only receive campaigns after an explicit opted_in
+  // record exists.
+  await query(`
+    CREATE TABLE IF NOT EXISTS marketing_consent (
+      account_id UUID PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+      status     TEXT NOT NULL CHECK (status IN ('opted_in','opted_out')),
+      source     TEXT NOT NULL DEFAULT 'admin' CHECK (source IN ('admin','sync')),
+      updated_by TEXT NOT NULL DEFAULT '',
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `)
+  await query(`CREATE INDEX IF NOT EXISTS idx_marketing_consent_status ON marketing_consent (status)`)
+
+  // One row per campaign SEND. The id is the email send-group id, so an
+  // idempotent replay of the same logical campaign can never create a second
+  // campaign record (ON CONFLICT DO NOTHING below).
+  await query(`
+    CREATE TABLE IF NOT EXISTS marketing_campaigns (
+      id                UUID PRIMARY KEY,
+      subject           TEXT NOT NULL,
+      body_type         TEXT NOT NULL DEFAULT 'text' CHECK (body_type IN ('text','html')),
+      type              TEXT NOT NULL DEFAULT 'promotion'
+                        CHECK (type IN ('update','announcement','promotion','notice')),
+      audience_count    INTEGER NOT NULL DEFAULT 0 CHECK (audience_count >= 0),
+      provider_messages INTEGER NOT NULL DEFAULT 0,
+      batch_count       INTEGER NOT NULL DEFAULT 0,
+      status            TEXT NOT NULL DEFAULT 'sent' CHECK (status IN ('sent','queued')),
+      sent_by           TEXT NOT NULL DEFAULT '',
+      sent_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `)
+  await query(`CREATE INDEX IF NOT EXISTS idx_marketing_campaigns_sent ON marketing_campaigns (sent_at)`)
+
   await query(`
     CREATE TABLE IF NOT EXISTS rayern_sync_state (
       key         TEXT PRIMARY KEY,
