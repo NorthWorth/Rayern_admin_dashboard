@@ -6,8 +6,15 @@ import { TrendLineChart } from '../components/charts'
 import { Collapser } from '../components/Collapser'
 import { observabilityService } from '../services/observability'
 import { useQuery } from '../hooks/useQuery'
-import { formatDuration, formatNumber, formatPct, healthLabel, healthTone, timeAgo } from '../lib/utils'
+import { formatDuration, formatNumber, formatPct, healthLabel, timeAgo } from '../lib/utils'
 import type { TraceSpan } from '../lib/types'
+
+function observabilityTone(status: 'healthy' | 'degraded' | 'failing' | 'unknown'): 'green' | 'amber' | 'red' | 'neutral' {
+  if (status === 'healthy') return 'green'
+  if (status === 'degraded') return 'amber'
+  if (status === 'failing') return 'red'
+  return 'neutral'
+}
 
 /**
  * Fills unobserved (null) buckets inside the observed window with 0 so the
@@ -76,7 +83,7 @@ export function ObservabilityPage() {
                 {q.data!.services.slice(0, visibleCount).map((s) => (
                   <tr key={s.service} className="border-b border-ink-100 last:border-0 hover:bg-ink-50/70">
                     <td className="px-4 py-2.5 font-medium text-ink-900">{s.service}</td>
-                    <td className="px-3 py-2.5"><StatusBadge tone={healthTone(s.status)}>{healthLabel(s.status)}</StatusBadge></td>
+                    <td className="px-3 py-2.5"><StatusBadge tone={observabilityTone(s.status)}>{healthLabel(s.status)}</StatusBadge></td>
                     <td className="px-3 py-2.5">
                       {s.freshness.status === 'none' || !s.freshness.lastTelemetryAt ? (
                         <span className="text-xs text-ink-400">No telemetry</span>
