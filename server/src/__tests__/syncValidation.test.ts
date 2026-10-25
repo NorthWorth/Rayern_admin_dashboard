@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { SyncPayload, unwrapRayernEnvelope, storePayload, readSyncedAggregates } from '../rayernSync'
+import { describe, it, expect } from 'vitest'
+import { SyncPayload, unwrapRayernEnvelope } from '../rayernSync'
 import { requireMonitoringToken } from '../auth/monitoringToken'
 import { config } from '../config'
 
@@ -138,7 +138,7 @@ describe('Rayern sync contract validation', () => {
     const failure = { success: false, error: { code: 'RATE_LIMITED', message: 'too many requests' } }
     const unwrapped = unwrapRayernEnvelope(failure)
     expect(unwrapped.ok).toBe(false)
-    expect(unwrapped.error).toContain('success=false')
+    expect(unwrapped.ok === false ? unwrapped.error : '').toContain('success=false')
   })
 })
 

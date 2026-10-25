@@ -1,31 +1,170 @@
-import { useState } from 'react'
+import { Link } from 'react-router-dom'
 import { Card, CardBody, CardHeader } from '../components/ui/Card'
 import { KpiCard } from '../components/KpiCard'
-import { Badge } from '../components/ui/Badge'
-import { EmptyState, ErrorState, LoadingBlock } from '../components/ui/states'
+import { LoadingBlock, ErrorState } from '../components/ui/states'
+import { StatusBadge } from '../components/ui/Badge'
+import { TrendLineChart } from '../components/charts'
 import { useQuery } from '../hooks/useQuery'
+import { platformMetricsService } from '../services/platformMetrics'
+import { emailsService } from '../services/emails'
 import { systemService } from '../services/system'
-import { formatDate, formatDateTime, formatNumber, formatPct, titleCase } from '../lib/utils'
-import type { SystemOverview, ServiceHistory, HistoryRange, HealthState } from '../lib/types'
-import { emailStatusTone, SenderChart } from './Overview'
+import { usersService } from '../services/users'
+import { workspacesService } from '../services/workspaces'
+import { formatDateTime, formatNumber, titleCase } from '../lib/utils'
+import type { EmailMessage, HealthStatus } from '../lib/types'
 
-const RANGE_LABELS: Record<HistoryRange, string> = {\n  '6h': 'Last 6 hours',\n  '24h': 'Last 24 hours',\n  '7d': 'Last 7 days',\n  '30d': 'Last 30 days',\n}
+function healthTone(s: HealthStatus): 'green' | 'amber' | 'red' {
+  return s === 'healthy' ? 'green' : s === 'degraded' ? 'amber' : 'red'
+}
 
-function HistoryRangePicker({ selected, onChange }: { selected: HistoryRange; onChange: (next: HistoryRange) => void }) {\n  return (\n    <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Time range">\n      {(Object.keys(RANGE_LABELS) as HistoryRange[]).map((range) => (\n        <button\n          key={range}\n          type="button"\n          role="radio"\n          aria-checked={selected === range}\n          onClick={() => onChange(range)}\n          className={`rounded-md border px-3 py-1.5 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-300 ${
-            selected === range\n              ? 'border-ink-400 bg-ink-100 text-ink-900'\n              : 'border-ink-200 bg-white text-ink-600 hover:bg-ink-50'\n          }`}\n        >\n          {RANGE_LABELS[range]}\n        </button>\n      ))}\n    </div>\n  )\n}
+export function OverviewPage() {
+  const usersQ = useQuery(() => usersService.stats())
+  const wsQ = useQuery(() => workspacesService.stats())
+  const metricsQ = useQuery(() => platformMetricsService.overview())
+  const emailsQ = useQuery(() => emailsService.list())
+  const emailStatsQ = useQuery(() => emailsService.stats())
+  const systemQ = useQuery(() => systemService.overview())
 
-function HealthBadge({ state }: { state: HealthState }) {\n  const tone = state === 'healthy' ? 'green' : state === 'degraded' ? 'amber' : 'red'\n  return (\n    <Badge tone={tone}>\n      <span className="flex items-center gap-1.5">\n        <span className={`h-1.5 w-1.5 rounded-full ${state === 'healthy' ? 'bg-green-500' : state === 'degraded' ? 'bg-amber-500' : 'bg-red-500'}`} />\n        {titleCase(state)}\n      </span>\n    </Badge>\n  )\n}
+  const emails = emailsQ.data ?? []
+  const recentEmails = emails.slice(0, 6)
+  const registrations = (metricsQ.data?.registrationsTrend ?? []).slice(-30)
 
-function ServiceRow({ service, transitions, range }: { service: SystemOverview['services'][0]; transitions: ReturnType<typeof systemService.transitions> extends Promise<infer T> ? T : never; range: HistoryRange }) {\n  const [history, setHistory] = useState<ServiceHistory | null>(null)\n\n  return (\n    <div className="flex flex-wrap items-start gap-4">\n      <div className="flex-1 min-w-0">\n        <div className="flex items-center gap-3">\n          <span className="font-medium text-ink-900">{service.name}</span>\n          <HealthBadge state={service.state} />\n          <span className="text-sm text-ink-500">Uptime {formatPct(service.uptime / 100, 2)}</span>\n        </div>\n        <p className="mt-1 text-xs text-ink-500">Last change {formatDateTime(service.lastChange)}</p>\n      </div>\n      <div className="flex items-center gap-2">\n        <HistoryRangePicker selected={range} onChange={() => {}} />\n      </div>\n    </div>\n  )\n}
+  return (
+    <div className="mx-auto max-w-7xl space-y-6 p-6">
+      {/* KPI grid — aggregate platform state only */}
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <KpiCard label="Registered accounts" value={usersQ.data ? formatNumber(usersQ.data.totalUsers) : '—'} sub={usersQ.data ? `${formatNumber(usersQ.data.newUsers7d)} new in 7d` : undefined} />
+        <KpiCard label="Workspaces" value={wsQ.data ? formatNumber(wsQ.data.total) : '—'} sub={wsQ.data ? `${formatNumber(wsQ.data.newWorkspaces30d)} new in 30d` : undefined} />
+        <KpiCard label="New accounts (30d)" value={metricsQ.data ? formatNumber(metricsQ.data.newAccounts30d) : '—'} />
+        <KpiCard label="Deletions (30d)" value={metricsQ.data ? formatNumber(metricsQ.data.deletedAccounts30d) : '—'} />
+        <KpiCard label="Emails sent (30d)" value={emailStatsQ.data ? formatNumber(emailStatsQ.data.totalSent) : '—'} sub={emailStatsQ.data ? `${formatNumber(emailStatsQ.data.failed)} failed` : undefined} />
+        <KpiCard
+          label="System status"
+          value={systemQ.data ? titleCase(systemQ.data.overall) : '—'}
+          tone={systemQ.data?.overall === 'healthy' ? 'green' : systemQ.data?.overall === 'degraded' ? 'amber' : 'red'}
+          sub={systemQ.data ? `${systemQ.data.errorRatePct.toFixed(2)}% error rate · p95 ${systemQ.data.latency.p95}ms` : undefined}
+        />
+      </div>
 
-export { emailStatusTone, SenderChart }
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        {/* Registrations trend */}
+        <Card className="xl:col-span-2">
+          <CardHeader
+            title="New registrations"
+            subtitle="Aggregate account registrations per day (30 days)"
+            actions={<Link to="/metrics" className="text-xs font-medium text-emerald-700 hover:text-emerald-800">Platform metrics →</Link>}
+          />
+          <CardBody>
+            {metricsQ.loading ? (
+              <LoadingBlock rows={6} />
+            ) : metricsQ.error ? (
+              <ErrorState message={metricsQ.error} onRetry={metricsQ.refetch} />
+            ) : metricsQ.data ? (
+              <TrendLineChart
+                data={registrations.map((d) => ({ time: d.date, count: d.count }))}
+                dataKey="count"
+                name="Registrations"
+                unit=""
+              />
+            ) : null}
+          </CardBody>
+        </Card>
 
-/**\n * Rounded volume totals shown in the overview header.\n * Computed from `emailsService.volume()` so they stay in sync with the email\n * domain even when demo data is enabled.\n */\nexport function senderTotals(volume: { totalSent: number; bySource: { source: string; sent: number; failures: number }[] }) {\n  const { totalSent, bySource } = useQuery(() => emailsService.volume())\n  const statsQ = useQuery(() => emailsService.stats())\n  const emailStats = statsQ.data ?? {\n    sent: 0,\n    open: 0,\n    clicked: 0,\n    unsubscribed: 0,\n    bounces: 0,\n    complaints: 0,\n    total: 0,\n    signed: 0,\n  }\n  return { totalSent: totalSent ?? 0, bySource: bySource ?? [] }\n}\n
+        {/* System health summary */}
+        <Card>
+          <CardHeader
+            title="System health"
+            subtitle="Services as reported by the dashboard backend"
+            actions={<Link to="/system" className="text-xs font-medium text-emerald-700 hover:text-emerald-800">Details →</Link>}
+          />
+          <CardBody className="space-y-2.5">
+            {systemQ.loading ? (
+              <LoadingBlock rows={6} />
+            ) : systemQ.error ? (
+              <ErrorState message={systemQ.error} onRetry={systemQ.refetch} />
+            ) : systemQ.data ? (
+              systemQ.data.services.slice(0, 8).map((s) => (
+                <div key={s.id} className="flex items-center justify-between text-sm">
+                  <span className="truncate text-ink-700">{s.name}</span>
+                  <StatusBadge tone={healthTone(s.status)}>{titleCase(s.status)}</StatusBadge>
+                </div>
+              ))
+            ) : null}
+          </CardBody>
+        </Card>
+      </div>
 
-const compatibilityMessage = 'The Overview page relies on emailsService.volume(), which is part of the new email domain. When demo mode is on, the chart falls back to a stable placeholder.'\n
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+        {/* Recent email activity */}
+        <Card>
+          <CardHeader
+            title="Recent email activity"
+            subtitle="Admin-sent messages tracked by the dashboard backend"
+            actions={<Link to="/emails" className="text-xs font-medium text-emerald-700 hover:text-emerald-800">All emails →</Link>}
+          />
+          {emailsQ.loading ? (
+            <CardBody><LoadingBlock rows={5} /></CardBody>
+          ) : emailsQ.error ? (
+            <ErrorState message={emailsQ.error} onRetry={emailsQ.refetch} />
+          ) : (
+            <table className="w-full text-sm">
+              <tbody>
+                {recentEmails.map((e: EmailMessage) => (
+                  <tr key={e.id} className="border-b border-ink-100 last:border-0">
+                    <td className="max-w-0 px-4 py-2.5">
+                      <p className="truncate font-medium text-ink-800">{e.subject}</p>
+                      <p className="truncate text-xs text-ink-500">{e.to.join(', ')} · {formatDateTime(e.sentAt)}</p>
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2.5 text-right">
+                      <StatusBadge tone={emailStatusTone(e.status)}>{titleCase(e.status)}</StatusBadge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Card>
 
-function emptyCompatiblityNote() {\n  return (\n    <p className="rounded-md border border-ink-200 bg-ink-50/60 px-4 py-3 text-sm text-ink-600">\n      {compatibilityMessage}\n    </p>\n  )\n}\n
+        {/* Quick links */}
+        <Card>
+          <CardHeader title="Operations shortcuts" subtitle="Common admin destinations" />
+          <CardBody className="grid grid-cols-2 gap-3">
+            <ShortcutLink to="/users" title="Users" desc="Account administration" />
+            <ShortcutLink to="/workspaces" title="Workspaces" desc="Aggregate registrations" />
+            <ShortcutLink to="/metrics" title="Platform metrics" desc="Privacy-safe aggregates" />
+            <ShortcutLink to="/emails" title="Send email" desc="Compose admin broadcast" />
+            <ShortcutLink to="/errors" title="Errors" desc="Recent failures and traces" />
+            <ShortcutLink to="/observability" title="Observability" desc="Traces, latency, slow ops" />
+          </CardBody>
+        </Card>
+      </div>
+    </div>
+  )
+}
 
-export function OverviewPage() {\n  const overviewQ = useQuery(() => systemService.overview())\n  const volumeQ = useQuery(() => emailsService.volume())\n  const transitionsQ = useQuery(() => systemService.transitions(overviewQ.data?.ranges[0] ?? '24h'))\n\n  const overview = overviewQ.data ?? {\n    services: [],\n    ranges: ['24h'],\n  }\n  const transitions = transitionsQ.data ?? []\n  const volume = volumeQ.data ?? { totalSent: 0, bySource: [], leader: { source: '', share: 0, volume: 0 } }\n  const range = overview.ranges[0] ?? '24h'\n\n  // Build a sender breakdown from the volume query for the chart.\n  const senderSeries = volume.bySource.map((s) => ({ source: s.source, sent: s.sent }))\n  const senderLeader = volume.leader\n\n  return (\n    <div className="mx-auto max-w-7xl p-4 sm:p-6 space-y-6">\n      {/* Header */}\n      <div className="flex flex-wrap items-start justify-between gap-4">\n        <div>\n          <h1 className="text-2xl font-semibold text-ink-900">Overview</h1>\n          <p className="mt-1 text-sm text-ink-500">Platform health, service status, and top email senders.</p>\n        </div>\n      </div>\n\n      {/* Service status cards */}\n      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">\n        {overview.services.map((service) => (\n          <Card key={service.name} className="overflow-hidden">\n            <CardHeader title={service.name} subtitle="" />\n            <CardBody>\n              <ServiceRow\n                service={service}\n                transitions={transitions as ReturnType<typeof systemService.transitions> extends Promise<infer T> ? T : never}\n                range={range}\n              />\n            </CardBody>\n          </Card>\n        ))}\n      </div>\n\n      {/* Sender breakdown */}\n      <Card>\n        <CardHeader title="Email senders" subtitle="Top senders by outgoing email volume this period." />\n        <CardBody>\n          {volumeQ.loading ? (\n            <LoadingBlock rows={4} />\n          ) : volumeQ.error ? (\n            <ErrorState message={volumeQ.error} onRetry={volumeQ.refetch} />\n          ) : senderSeries.length === 0 ? (\n            <EmptyState title="No email senders yet" description="Sender volume appears once emails have been sent through the dashboard." />\n          ) : (\n            <div className="space-y-4">\n              <div className="h-[220px]">\n                <SenderChart\n                  series={senderSeries}\n                  leader={senderLeader}\n                  totalSent={volume.totalSent}\n                />\n              </div>\n              <div className="overflow-x-auto">\n                <table className="w-full text-sm">\n                  <thead>\n                    <tr className="border-b border-ink-200 bg-ink-50/60 text-left text-[11px] font-semibold uppercase tracking-wide text-ink-500">\n                      <th scope="col" className="px-4 py-2.5">Source</th>\n                      <th scope="col" className="px-3 py-2.5 text-right">Volume</th>\n                      <th scope="col" className="px-3 py-2.5 text-right">Share</th>\n                      <th scope="col" className="px-3 py-2.5 text-right">Failures</th>\n                    </tr>\n                  </thead>\n                  <tbody>\n                    {volume.bySource.map((s) => (\n                      <tr key={s.source} className="border-b border-ink-100 last:border-0">\n                        <td className="px-4 py-2.5 font-medium text-ink-900">{s.source}</td>\n                        <td className="px-3 py-2.5 text-right tabular-nums text-ink-700">{formatNumber(s.sent)}</td>\n                        <td className="px-3 py-2.5 text-right tabular-nums text-ink-700">{formatPct(shareFor(s.source, volume.bySource), 1)}</td>\n                        <td className="px-3 py-2.5 text-right tabular-nums text-ink-700">{formatNumber(s.failures)}</td>\n                      </tr>\n                    ))}\n                  </tbody>\n                </table>\n              </div>\n            </div>\n          )}\n          {!volumeQ.loading && !volumeQ.error && emptyCompatiblityNote()}\n        </CardBody>\n      </Card>\n    </div>\n  )\n}\n\nfunction shareFor(source: string, bySource: { source: string; sent: number; failures: number }[]): number {\n  const total = bySource.reduce((sum, s) => sum + s.sent, 0)\n  if (total === 0) return 0\n  const found = bySource.find((s) => s.source === source)\n  return found ? (found.sent / total) * 100 : 0\n}
+function ShortcutLink({ to, title, desc }: { to: string; title: string; desc: string }) {
+  return (
+    <Link
+      to={to}
+      className="rounded-md border border-ink-200 px-3.5 py-3 transition-colors hover:border-ink-300 hover:bg-ink-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ink-300"
+    >
+      <p className="text-sm font-medium text-ink-900">{title}</p>
+      <p className="mt-0.5 text-xs text-ink-500">{desc}</p>
+    </Link>
+  )
+}
 
-/** Chart-friendly sender breakdown from the volume query. */\nexport function SenderChart({ series, leader, totalSent }: {\n  series: { source: string; sent: number }[]\n  leader: { source: string; share: number; volume: number }\n  totalSent: number\n}) {\n  const max = Math.max(totalSent, leader.volume, 1)\n  const formatter = (v: number) => Math.round(v).toLocaleString()\n\n  return (\n    <div className="flex flex-col gap-3">\n      <div className="flex items-end gap-2">\n        {series.map((s) => {\n          const height = (s.sent / max) * 100\n          return (\n            <div key={s.source} className="flex-1 space-y-1">\n              <span className="text-[10px] font-medium text-ink-500">{formatter(s.sent)}</span>\n              <div\n                className="h-32 w-full rounded-t-md bg-ink-200"\n                style={{ height: `${Math.max(4, height)}%` }}\n              />\n              <span className="text-[11px] text-ink-600">{s.source}</span>\n            </div>\n          )\n        })}\n      </div>\n      <p className="text-xs text-ink-500">\n        Leader: <span className="font-medium text-ink-700">{leader.source}</span> with {formatter(leader.volume)} messages ({formatPct(leader.share, 1)} of total).\n      </p>\n    </div>\n  )\n}
+export function emailStatusTone(status: EmailMessage['status']): 'green' | 'amber' | 'red' | 'blue' {
+  switch (status) {
+    case 'delivered':
+    case 'sent':
+      return 'green'
+    case 'queued':
+      return 'blue'
+    case 'failed':
+    case 'bounced':
+      return 'red'
+    default:
+      return 'amber'
+  }
+}

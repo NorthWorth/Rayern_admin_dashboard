@@ -1,5 +1,4 @@
 import { Router, type Request, type Response, type NextFunction } from 'express'
-import type { AuthenticatedRequest } from '../auth'
 import { requireAuth } from '../auth'
 import { requireAdmin } from '../auth'
 import { requireMonitoringToken } from '../auth/monitoringToken'
@@ -18,7 +17,7 @@ export const metricsRouter = Router()
  * similarly-named paths are NOT exempt).
  * Refresh freely.
  */
-metricsRouter.get('/api/v1/admin/metrics', requireAuth, requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+metricsRouter.get('/api/v1/admin/metrics', requireAuth, requireAdmin, async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const payload = await buildAdminMetricPayload()
     res.json({ success: true, data: payload })

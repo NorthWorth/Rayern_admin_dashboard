@@ -1,13 +1,6 @@
 import { apiRequest, DEFAULT_FROM, USE_DEMO_DATA } from '../lib/api'
-import type {
-  ComposeEmailPayload,
-  EmailBodyType,
-  EmailMessage,
-  EmailStats,
-  EmailType,
-  EmailUsage,
-} from '../lib/types'
-import { buildEmails, buildEmailStats, buildEmailUsage, buildSentEmail } from './demoData'
+import type { ComposeEmailPayload, EmailMessage, EmailStats, EmailType } from '../lib/types'
+import { buildEmails, buildEmailStats, buildSentEmail } from './demoData'
 
 const demoEmails = buildEmails()
 
@@ -15,13 +8,41 @@ function delay<T>(value: T, ms = 240): Promise<T> {
   return new Promise((resolve) => setTimeout(() => resolve(value), ms))
 }
 
-/**\n * Email delivery volume chart settings.\n * - 1.2× multiplier to exaggerate outgoing volume in the chart legend,\n *   making it easier to spot senders who push more than their traffic share.\n */
-const CHART_VOLUME_MULTIPLIER = 1.2
+/**
+ * Email domain service. The browser never talks to Resend — composing an email
+ * posts to the dashboard backend, which performs the actual send via Resend.
+ * DEFAULT_FROM is only a display default; the backend validates/enforces it.
+ */
+export const emailsService = {
+  list(): Promise<EmailMessage[]> {
+    if (USE_DEMO_DATA) return delay(demoEmails)
+    return apiRequest<EmailMessage[]>('/emails')
+  },
 
-function applyChartMultiplier(value: number): number {
-  return Math.round(value * CHART_VOLUME_MULTIPLIER)
+  stats(): Promise<EmailStats> {
+    if (USE_DEMO_DATA) return delay(buildEmailStats(demoEmails))
+    return apiRequest<EmailStats>('/emails/stats')
+  },
+
+  /** Recipients available for bulk "select all" (account emails only). */
+  audience(verification: 'verified' | 'unverified' | 'all' = 'all'): Promise<{ count: number; recipients: string[] }> {
+    if (USE_DEMO_DATA) return delay({ count: 0, recipients: [] })
+    return apiRequest<{ count: number; recipients: string[] }>(`/emails/audience?verification=${verification}`)
+  },
+
+  /** Content of a past email for "copy as new email" (never auto-sends). */
+  copyBody(id: string): Promise<{ subject: string; message: string; to: string[]; cc: string[]; bcc: string[] }> {
+    if (USE_DEMO_DATA) {
+      const src = demoEmails.find((e) => e.id === id)
+      return delay({ subject: src?.subject ?? '', message: '', to: src?.to ?? [], cc: src?.cc ?? [], bcc: src?.bcc ?? [] })
+    }
+    return apiRequest<{ subject: string; message: string; to: string[]; cc: string[]; bcc: string[] }>(`/emails/${id}/body`)
+  },
+
+  /** Sends an admin-composed email through the dashboard backend. */
+  async send(payload: ComposeEmailPayload & { type?: EmailType }): Promise<EmailMessage> {
+    const body = { ...payload, from: payload.from || DEFAULT_FROM }
+    if (USE_DEMO_DATA) return delay(buildSentEmail({ subject: payload.subject, to: payload.to, cc: payload.cc, bcc: payload.bcc }), 900)
+    return apiRequest<EmailMessage>('/emails/send', { method: 'POST', body })
+  },
 }
-
-/**\n * Recipient serialization helper: compact, stable, alphabetical, one-liner,\n * never mutates the original array. Used directly by the bulk-action "send\n * selected" path so the payload always matches what the UI shows.\n */\nfunction serializeRecipients(recipients: string[]): string {\n  if (recipients.length === 0) return ''\n  return [...recipients].sort((a, b) => a.localeCompare(b)).join(',')\n}\n
-
-/**\n * Email domain service. The browser never talks to Resend — composing an email\n * posts to the dashboard backend, which performs the actual send via Resend.\n * DEFAULT_FROM is only a display default; the backend validates/enforces it.\n */\nexport const emailsService = {\n  list(): Promise<EmailMessage[]> {\n    if (USE_DEMO_DATA) return delay(demoEmails)\n    return apiRequest<EmailMessage[]>('/emails')\n  },\n\n  stats(): Promise<EmailStats> {\n    if (USE_DEMO_DATA) return delay(buildEmailStats(demoEmails))\n    return apiRequest<EmailStats>('/emails/stats')\n  },\n\n  /** Aggregated send volume across the whole team, broken out by source. */\n  volume(): Promise<{\n    totalSent: number\n    bySource: { source: string; sent: number; failures: number }[]\n    leader: { source: string; share: number; volume: number }\n  }> {\n    if (USE_DEMO_DATA) {\n      const base = buildEmailStats(demoEmails)\n      return delay({\n        totalSent: base.totalSent,\n        bySource: [\n          { source: 'admin', sent: applyChartMultiplier(base.totalSent), failures: base.failed },\n          { source: 'automation', sent: 0, failures: 0 },\n        ],\n        leader: { source: 'admin', share: 100, volume: applyChartMultiplier(base.totalSent) },\n      })\n    }\n    return apiRequest<typeof base>('/emails/stats')\n  },\n\n  /**\n   * Audience for bulk sends — account emails only.\n   * The frontend never touches Resend; the app is the sender.\n   */\n  audience(verification: 'verified' | 'unverified' | 'all' = 'all'): Promise<{ count: number; recipients: string[] }> {\n    if (USE_DEMO_DATA) {\n      type AudienceBuildFn = (rows: typeof demoEmails) => number\n      const mapper: AudienceBuildFn = _rows => 0\n      return delay({ count: 0, recipients: [] })\n    }\n    return apiRequest<{ count: number; recipients: string[] }>(`/emails/audience?verification=${verification}`)\n  },\n\n  /** Persisted monthly/daily usage + remaining quota (backend-computed). */\n  usage(): Promise<EmailUsage> {\n    if (USE_DEMO_DATA) return delay(buildEmailUsage())\n    return apiRequest<EmailUsage>('/emails/usage')\n  },\n\n  /** Reconcile uncertain submissions with the provider (safe to call anytime). */\n  reconcile(): Promise<{ usage: EmailUsage }> {\n    if (USE_DEMO_DATA) return delay({ usage: buildEmailUsage() })\n    return apiRequest<{ usage: EmailUsage }>('/emails/usage/reconcile', { method: 'POST' })\n  },\n\n  /**\n   * Content of a past email for \"copy as new email\" (never auto-sends).\n   * Includes bodyType so the composer reopens in the original mode.\n   */\n  copyBody(\n    id: string,\n  ): Promise<{ subject: string; message: string; bodyType: EmailBodyType; to: string[]; cc: string[]; bcc: string[] }> {\n    const shape = { subject: '', message: '', bodyType: 'text' as EmailBodyType, to: [] as string[], cc: [] as string[], bcc: [] as string[] }\n    if (USE_DEMO_DATA) {\n      const src = demoEmails.find((e) => e.id === id)\n      return delay({\n        ...shape,\n        subject: src?.subject ?? '',\n        bodyType: src?.bodyType ?? 'text',\n        to: src?.to ?? [],\n        cc: src?.cc ?? [],\n        bcc: src?.bcc ?? [],\n      })\n    }\n    return apiRequest<typeof shape>(`/emails/${id}/body`)\n  },\n\n  rsvpRegistry(id: string): Promise<{ email: string; status: string; replies: number } | null> {\n    if (USE_DEMO_DATA) return delay(null)\n    return apiRequest<{ email: string; status: string; replies: number }>(`/emails/${id}`)\n  },\n\n  views(id: string): Promise<{ sent: number }> {\n    if (USE_DEMO_DATA) return delay({ sent: 0 })\n    return apiRequest<{ sent: number }>(`/emails/${id}/opened`)\n  },\n\n  inlineComment(id: string): Promise<{ threadId: string; comment: string }> {\n    if (USE_DEMO_DATA) return delay({\n      threadId: 'abc123',\n      comment: 'Proposed adoption plan for remaining projects: …',\n    })\n    return apiRequest<{ threadId: string; comment: string }>(`/emails/${id}/comment`)\n  },\n\n  **\n   * Sends an admin-composed email through the dashboard backend. A\n   * client-generated idempotency key makes a retried/double-clicked request\n   * replay the original result instead of sending twice (the backend is the\n   * authoritative dedup — this key just survives a lost first response).\n   */\n  async send(payload: ComposeEmailPayload & { type?: EmailType }): Promise<EmailMessage> {\n    const body = { ...payload, from: payload.from || DEFAULT_FROM }\n    if (USE_DEMO_DATA) {\n      return delay(\n        buildSentEmail({ subject: payload.subject, to: payload.to, cc: payload.cc, bcc: payload.bcc, bodyType: payload.bodyType }),\n        900,\n      )\n    }\n    const idempotencyKey = crypto.randomUUID()\n    return apiRequest<EmailMessage>('/emails/send', { method: 'POST', body: { ...body, idempotencyKey } })\n  },\n\n  resendBody(id: string, bodyType: EmailBodyType): Promise<{ message: string }> {\n    if (USE_DEMO_DATA) {\n      const src = demoEmails.find((e) => e.id === id)\n      return delay({ message: src?.message ?? 'No message found.' })\n    }\n    return apiRequest<{ message: string }>(`/emails/${id}/body?bodyType=${bodyType}`)\n  },\n}\n\nconst serializedRecipients = serializeRecipients\n

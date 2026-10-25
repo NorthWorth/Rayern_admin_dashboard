@@ -17,7 +17,9 @@
  * no samples are recorded and every derived value reports null (never a fake
  * zero) so the API can honestly say "unavailable".
  */
-import { monitorEventLoopDelay, type IntervalHistogram } from 'node:perf_hooks'
+import { monitorEventLoopDelay } from 'node:perf_hooks'
+
+type IntervalHistogram = ReturnType<typeof monitorEventLoopDelay>
 import os from 'node:os'
 import { config } from '../config'
 
