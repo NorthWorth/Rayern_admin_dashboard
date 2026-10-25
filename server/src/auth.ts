@@ -10,6 +10,29 @@ export interface AuthenticatedRequest extends Request {
   }
 }
 
+/**
+ * Parses and verifies the dashboard admin JWT (Bearer token issued by
+ * `POST /auth/login`). A missing or invalid token leaves `req.user` /
+ * `req.admin` unset so the route guards below can answer 401 — the token is
+ * never trusted before this middleware runs.
+ */
+export function authenticate(req: AuthenticatedRequest, _res: Response, next: NextFunction): void {
+  const header = req.headers.authorization ?? ''
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : null
+  if (!token) {
+    next()
+    return
+  }
+  try {
+    const payload = jwt.verify(token, config.jwtSecret) as AdminTokenPayload
+    req.admin = payload
+    req.user = { id: payload.sub, email: payload.email, role: payload.role }
+  } catch {
+    // Invalid/expired token: leave the request unauthenticated (401 downstream).
+  }
+  next()
+}
+
 export function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
   if (!req.user) {
     res.status(401).json({
@@ -29,7 +52,11 @@ export function requireAdmin(req: AuthenticatedRequest, res: Response, next: Nex
     })
     return
   }
-  if (!config.adminEmails.includes(req.user.email.toLowerCase())) {
+  // Dashboard admins are the `admin_users` rows that carry role 'admin' (the
+  // only accounts `POST /auth/login` issues tokens for). When ADMIN_EMAILS is
+  // configured it stays an additional allow-list for non-admin roles.
+  const allowlisted = config.adminEmails.includes(req.user.email.toLowerCase())
+  if (req.user.role !== 'admin' && !allowlisted) {
     res.status(403).json({
       success: false,
       error: { code: 'ADMIN_ACCESS_REQUIRED', message: 'Admin access required' },

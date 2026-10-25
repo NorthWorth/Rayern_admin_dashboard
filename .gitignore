@@ -1,2 +1,10 @@
 # Ignore AI-generated artifact files (PR bodies, logs, screenshots)
 artifacts/
+
+# Dependencies and build output (never committed)
+node_modules/
+dist/
+
+# Local environment files — secrets never belong in the repository
+.env
+.env.*

@@ -4,6 +4,7 @@ import { OverviewPage } from './pages/Overview'
 import { UsersPage } from './pages/Users'
 import { WorkspacesPage } from './pages/Workspaces'
 import { MetricsPage } from './pages/Metrics'
+import { RevenuePage } from './pages/Revenue'
 import { EmailsPage } from './pages/Emails'
 import { SystemPage } from './pages/System'
 import { ErrorsPage } from './pages/Errors'
@@ -30,6 +31,7 @@ const NAV: Array<{ section: string; items: NavItem[] }> = [
       { to: '/users', label: 'Users', icon: 'users' },
       { to: '/workspaces', label: 'Workspaces', icon: 'grid-small' },
       { to: '/metrics', label: 'Platform Metrics', icon: 'chart' },
+      { to: '/revenue', label: 'Revenue', icon: 'revenue' },
     ],
   },
   {
@@ -75,6 +77,8 @@ function NavIcon({ name }: { name: string }) {
       return <svg {...common}><circle cx="12" cy="12" r="3" /><path d="M12 2v4" /><path d="M12 18v4" /><path d="M2 12h4" /><path d="M18 12h4" /></svg>
     case 'list':
       return <svg {...common}><path d="M8 6h13" /><path d="M8 12h13" /><path d="M8 18h13" /><circle cx="4" cy="6" r="1" fill="currentColor" stroke="none" /><circle cx="4" cy="12" r="1" fill="currentColor" stroke="none" /><circle cx="4" cy="18" r="1" fill="currentColor" stroke="none" /></svg>
+    case 'revenue':
+      return <svg {...common}><path d="M12 3v18" /><path d="M16.5 7.5c0-1.7-2-3-4.5-3s-4.5 1.3-4.5 3 2 2.6 4.5 3 4.5 1.3 4.5 3-2 3-4.5 3-4.5-1.3-4.5-3" /></svg>
     default:
       return <svg {...common}><circle cx="12" cy="12" r="9" /></svg>
   }
@@ -85,7 +89,8 @@ const pageTitles: Record<string, { title: string; sub: string }> = {
   '/users': { title: 'Users', sub: 'Account administration — workspace contents are never accessible' },
   '/workspaces': { title: 'Workspaces', sub: 'Aggregate workspace registrations' },
   '/metrics': { title: 'Platform Metrics', sub: 'Privacy-safe aggregate platform statistics' },
-  '/emails': { title: 'Emails', sub: 'Admin-sent email history and composer' },
+  '/revenue': { title: 'Revenue', sub: 'MRR, ARR and subscription metrics reported by Rayern' },
+  '/emails': { title: 'Emails', sub: 'Composer, consent-gated campaigns and recipient selection' },
   '/system': { title: 'System', sub: 'API, infrastructure and service health' },
   '/errors': { title: 'Errors', sub: 'Recent failures across services' },
   '/observability': { title: 'Observability', sub: 'Traces, latency and service performance' },
@@ -233,6 +238,7 @@ function Shell({ onSignOut }: { onSignOut: () => void }) {
             <Route path="/users" element={<UsersPage />} />
             <Route path="/workspaces" element={<WorkspacesPage />} />
             <Route path="/metrics" element={<MetricsPage />} />
+            <Route path="/revenue" element={<RevenuePage />} />
             <Route path="/emails" element={<EmailsPage />} />
             <Route path="/system" element={<SystemPage />} />
             <Route path="/errors" element={<ErrorsPage />} />

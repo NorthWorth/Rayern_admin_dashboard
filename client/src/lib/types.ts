@@ -284,3 +284,169 @@ export interface AdminOperator {
   email: string
   role: string
 }
+
+/* -------------------------------- Revenue --------------------------------- */
+
+/**
+ * Billing block of `GET /api/v1/admin/metrics` (docs/ADMIN_DASHBOARD_BILLING_CONTRACT.md
+ * §2.3). Rayern is the source of truth: these values are rendered exactly as
+ * reported — never recalculated client-side.
+ */
+export interface MrrByPlanEntry {
+  plan: string
+  subscriberCount: number
+  mrrMinor: number
+}
+
+export interface PlanBreakdownEntry {
+  plan: string
+  userCount: number
+  subscriptionCount: number
+  isPaid: boolean
+}
+
+export interface AdminMetricBilling {
+  currency: string
+  amountUnit: string
+  generatedAt: string
+  activePaidSubscribers: number
+  freeUsers: number
+  totalAccounts: number
+  mrr: { amountMinor: number; amountMajor: number; byPlan: MrrByPlanEntry[] }
+  arr: { amountMinor: number; amountMajor: number; definition: string }
+  planBreakdown: PlanBreakdownEntry[]
+  definitions: Record<string, unknown>
+}
+
+export interface AdminMetricPayload {
+  accounts: {
+    totalAccounts: number
+    newAccounts30d: number
+    verifiedAccounts: number
+    unverifiedAccounts: number
+    deletedAccounts30d: number | null
+    deletionRequestsPending: number | null
+    registrationsTrend: Array<{ date: string; count: number }>
+    planBreakdown: Array<{ plan: string; count: number }>
+  } | null
+  workspaces: {
+    totalWorkspaces: number
+    newWorkspaces30d: number
+    avgMembersPerWorkspace: number
+  } | null
+  billing: AdminMetricBilling | null
+  services: Array<Record<string, unknown>> | null
+  telemetry: Record<string, unknown> | null
+}
+
+/** Envelope of `GET /api/v1/admin/metrics` (§2.3) and error responses (§1). */
+export interface AdminMetricResponse {
+  success: boolean
+  data?: AdminMetricPayload
+  error?: { code?: string; message?: string }
+}
+
+/* --------------------------- Campaigns & recipients ----------------------- */
+
+/** Plan catalog from `GET /api/v1/admin/users` (§4). */
+export type RayernPlan = 'starter' | 'pro' | 'business' | 'premium'
+export const RAYERN_PLANS: RayernPlan[] = ['starter', 'pro', 'business', 'premium']
+
+/** `subscriptionStatus` values accepted by the admin users API (§4). */
+export type SubscriptionStatus = 'none' | 'active' | 'non_renewing' | 'past_due' | 'canceled' | 'expired'
+export const SUBSCRIPTION_STATUSES: SubscriptionStatus[] = [
+  'none', 'active', 'non_renewing', 'past_due', 'canceled', 'expired',
+]
+
+/** `consent` filter values accepted by the admin users API (§4). */
+export type ConsentFilter = 'opted_in' | 'opted_out'
+
+export interface AdminUserFilters {
+  page?: number
+  limit?: number
+  plan?: RayernPlan | 'all'
+  subscriptionStatus?: SubscriptionStatus | 'all'
+  consent?: ConsentFilter | 'all'
+}
+
+/** One row of `GET /api/v1/admin/users` (§4) — fields used by the picker. */
+export interface AdminUserRecord {
+  id: ID
+  email: string
+  firstName?: string | null
+  lastName?: string | null
+  emailVerified?: boolean
+  accountStatus?: string
+  createdAt?: string
+  marketingConsent?: { optedIn: boolean; consentedAt?: string | null; updatedAt?: string | null; source?: string } | null
+  workspace?: { id?: string; name?: string; plan?: string } | null
+  subscription?: {
+    plan?: string
+    status?: string
+    billingInterval?: string | null
+    currentPeriodEnd?: string | null
+    cancelAtPeriodEnd?: boolean
+    hasPaidAccess?: boolean
+  } | null
+}
+
+export interface AdminUsersPage {
+  pagination: { page: number; limit: number; totalResults: number; totalPages: number }
+  filters: Record<string, string | null>
+  currency?: string
+  users: AdminUserRecord[]
+}
+
+/** Audience selector shared by preview and send (§5.1). */
+export type CampaignAudience =
+  | { type: 'all_eligible' }
+  | { type: 'filters'; plan?: RayernPlan; subscriptionStatus?: SubscriptionStatus }
+  | { type: 'manual_emails'; emails: string[] }
+
+/** Response of `POST /api/v1/admin/campaigns/preview` (§5.2). */
+export interface CampaignPreviewResponse {
+  audience: CampaignAudience
+  eligibleCount: number
+  skippedCount: number
+  sizeCap: number
+  capped: boolean
+  preview: Array<{ email: string }>
+  previewTruncated: boolean
+  skipped: Array<{ email: string; reason: SkipReason }>
+}
+
+/** Server-side skip reasons (§5.1) — mapped to human labels in the UI. */
+export type SkipReason = 'unknown_address' | 'not_opted_in' | 'account_suspended' | 'consent_revoked_at_send' | string
+
+export const SKIP_REASON_LABELS: Record<string, string> = {
+  unknown_address: 'Not a known Rayern account',
+  not_opted_in: 'No marketing opt-in',
+  account_suspended: 'Account suspended',
+  consent_revoked_at_send: 'Opted out during send',
+}
+
+export interface CampaignComposePayload {
+  subject: string
+  bodyHtml: string
+  bodyText?: string
+  audience: CampaignAudience
+  idempotencyKey?: string
+}
+
+/** Response of `POST /api/v1/admin/campaigns/send` (§5.3). */
+export interface CampaignSendResponse {
+  duplicate?: boolean
+  campaign: {
+    id: string
+    status: string
+    subject: string
+    audience: CampaignAudience
+    totals: { resolved: number; accepted: number; failed: number; skipped: number }
+    accepted: Array<{ email: string; providerMessageId?: string }>
+    failed: Array<{ email: string; error: string }>
+    skipped: Array<{ email: string; reason: SkipReason }>
+    startedAt?: string
+    completedAt?: string
+    createdAt?: string
+  }
+}

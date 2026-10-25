@@ -1,4 +1,4 @@
-import type { ID, Paged } from './types'
+import type { AdminMetricResponse, ID, Paged } from './types'
 import type { AdminOperator } from './types'
 
 /**
@@ -103,8 +103,18 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   if (!res.ok) {
     let message = `Request failed with status ${res.status}`
     try {
-      const payload = (await res.json()) as { message?: string; error?: string }
-      message = payload.message ?? payload.error ?? message
+      const payload = (await res.json()) as {
+        message?: string
+        error?: string | { code?: string; message?: string }
+      }
+      if (typeof payload.message === 'string' && payload.message) {
+        message = payload.message
+      } else if (typeof payload.error === 'string' && payload.error) {
+        message = payload.error
+      } else if (payload.error && typeof payload.error === 'object' && typeof payload.error.message === 'string') {
+        // Rayern/dashboard error envelope: { success: false, error: { code, message } }
+        message = payload.error.message
+      }
     } catch {
       // keep default message
     }
@@ -140,6 +150,15 @@ export async function login(email: string, password: string): Promise<LoginRespo
     throw new HttpError(message, res.status)
   }
   return (await res.json()) as LoginResponse
+}
+
+/**
+ * `GET /api/v1/admin/metrics` — authoritative Rayern metrics (contract §2.1)
+ * served by the dashboard backend from the pull-sync state. The billing block
+ * inside `data` is Rayern's; the dashboard never recalculates it.
+ */
+export async function adminMetrics(signal?: AbortSignal): Promise<AdminMetricResponse> {
+  return apiRequest<AdminMetricResponse>('/api/v1/admin/metrics', { signal })
 }
 
 /** Builds a querystring from defined params, skipping empty values. */

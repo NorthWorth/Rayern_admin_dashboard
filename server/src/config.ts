@@ -86,10 +86,32 @@ const otlpTracesEndpoint = trimmed('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT')
 const otlpBaseEndpoint = trimmed('OTEL_EXPORTER_OTLP_ENDPOINT')
 const otlpHeadersRaw = trimmed('OTEL_EXPORTER_OTLP_TRACES_HEADERS') || trimmed('OTEL_EXPORTER_OTLP_HEADERS')
 
+/**
+ * URL construction for the Rayern pull-sync: the explicit endpoint wins; when
+ * only the base URL is configured the documented default path is appended
+ * (see server/env.example). Never invents a host.
+ */
+function rayernSyncEndpoint(): string {
+  const explicit = trimmed('RAYERN_SYNC_ENDPOINT') || trimmed('RAYERN_INTERNAL_DASHBOARD_METRICS')
+  if (explicit) return explicit
+  const base = trimmed('RAYERN_API_BASE_URL')
+  return base ? `${base.replace(/\/$/, '')}/internal/dashboard-metrics` : ''
+}
+
 export const config = {
   rayern: {
-    syncEndpoint: process.env.RAYERN_SYNC_ENDPOINT ?? process.env.RAYERN_INTERNAL_DASHBOARD_METRICS ?? '',
+    syncEndpoint: rayernSyncEndpoint(),
     monitoringToken: process.env.RAYERN_MONITORING_TOKEN ?? '',
+    /** Base URL of the Rayern backend (origin only) for the admin API proxy. */
+    apiBaseUrl: trimmed('RAYERN_API_BASE_URL').replace(/\/$/, ''),
+    /**
+     * Rayern admin service credentials used by the dashboard backend to call
+     * Rayern's admin endpoints (`/api/v1/admin/users`,
+     * `/api/v1/admin/campaigns/*`). Rayern issues a short-lived session JWT
+     * from these; consent and authorization are still enforced by Rayern.
+     */
+    adminEmail: trimmed('RAYERN_ADMIN_EMAIL'),
+    adminPassword: process.env.RAYERN_ADMIN_PASSWORD ?? '',
     timeoutMs: Math.max(5000, Number(process.env.RAYERN_SYNC_TIMEOUT_MS ?? '15000')),
     intervalMs: Math.max(10_000, Number(process.env.RAYERN_SYNC_INTERVAL_MS ?? '300000')),
   },
@@ -216,3 +238,9 @@ export const config = {
 }
 
 export const rayernSyncEnabled = (): boolean => config.rayern.syncEndpoint.length > 0
+
+/** True when the dashboard backend can reach Rayern's admin API (proxy). */
+export const rayernAdminProxyEnabled = (): boolean =>
+  config.rayern.apiBaseUrl.length > 0 &&
+  config.rayern.adminEmail.length > 0 &&
+  config.rayern.adminPassword.length > 0

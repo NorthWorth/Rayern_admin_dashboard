@@ -1,5 +1,12 @@
 import type { HealthStatus } from './types'
 
+/** Formats a MAJOR-unit amount exactly as Rayern reported it (no rounding,
+ * no conversion, no recalculation — only grouping for display). */
+export function formatCurrencyMajor(amountMajor: number, currency?: string): string {
+  const sym = currency || 'USD'
+  return `${sym}${amountMajor.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
 export function formatNumber(n: number): string {
   return new Intl.NumberFormat('en-US').format(n)
 }

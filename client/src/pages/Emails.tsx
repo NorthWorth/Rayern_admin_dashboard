@@ -11,6 +11,7 @@ import { VolumeBarChart } from '../components/charts'
 import { useToast } from '../components/ui/Toast'
 import { useQuery } from '../hooks/useQuery'
 import { emailsService } from '../services/emails'
+import { CampaignComposer } from '../components/CampaignComposer'
 import { DEFAULT_FROM } from '../lib/api'
 import { formatDateTime, formatNumber, titleCase } from '../lib/utils'
 import type { EmailType } from '../lib/types'
@@ -37,6 +38,7 @@ export function EmailsPage() {
   const listQ = useQuery(() => emailsService.list())
   const statsQ = useQuery(() => emailsService.stats())
   const [composerOpen, setComposerOpen] = useState(false)
+  const [campaignOpen, setCampaignOpen] = useState(false)
   const [copySource, setCopySource] = useState<string | null>(null)
 
   const emails = listQ.data ?? []
@@ -105,10 +107,16 @@ export function EmailsPage() {
           title="Recent email activity"
           subtitle="Metadata only — content is not displayed here"
           actions={
-            <Button variant="primary" onClick={() => openComposer()}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-              Send Email
-            </Button>
+            <>
+              <Button variant="secondary" onClick={() => setCampaignOpen(true)}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M22 11l-3-3M19 8h4v4" /></svg>
+                New campaign
+              </Button>
+              <Button variant="primary" onClick={() => openComposer()}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+                Send Email
+              </Button>
+            </>
           }
         />
         {listQ.loading ? (
@@ -164,6 +172,14 @@ export function EmailsPage() {
       </Card>
 
       <EmailComposer open={composerOpen} copyId={copySource} onClose={() => setComposerOpen(false)} onSent={() => listQ.refetch()} />
+      <CampaignComposer
+        open={campaignOpen}
+        onClose={() => setCampaignOpen(false)}
+        onSent={() => {
+          listQ.refetch()
+          statsQ.refetch()
+        }}
+      />
     </div>
   )
 }

@@ -240,6 +240,8 @@ All API communication lives in `client/src/services/` — no `fetch` calls in co
 | `observabilityService`   | `/observability/overview`                        |
 | `auditService`           | `/audit`                                         |
 | `marketingService`       | `/marketing/metrics`, `/marketing/directory`, `/marketing/consent` (GET + `PATCH /:accountId`), `POST /marketing/campaigns/preview`, `POST /marketing/campaigns/send` |
+| `revenueService`         | `GET /api/v1/admin/metrics` (contract §2; billing block from the Rayern pull-sync, rendered verbatim) |
+| `campaignsService`       | `GET /api/v1/admin/users` (contract §4 filters), `POST /api/v1/admin/campaigns/preview`, `POST /api/v1/admin/campaigns/send` — proxied server-side to Rayern (`routes/rayernAdmin.ts`), consent revalidated by Rayern at send time |
 | `session / login`        | `POST /auth/login`                              |
 
 ## Telemetry (OpenTelemetry)
@@ -276,7 +278,8 @@ Starts the API (embedded PGlite), exercises all endpoints (auth, users, workspac
 - **Users** — searchable, filterable account administration table (verification status, account status, registration date) with no workspace-content drill-downs.
 - **Workspaces** — aggregate registration metadata only: name, member count, plan, creation date. No owners' emails, contents, or activity.
 - **Platform Metrics** — privacy-safe aggregates: registered accounts, new registrations over time, verified vs unverified, deletions, pending deletion requests, workspace totals and plan breakdown.
-- **Emails / Send Email** — admin-initiated sending only. Composer with From (fixed: `Rayern <support@rayern.com.ng>`), To, CC, BCC (any non-empty combination is sendable), Plain Text/HTML body mode with sandboxed preview, subject, email type; validation, sending state, success/failure feedback, and a bulk-safe send history (audience counts, mode, copy as new).
+- **Revenue** — financial/subscription metrics reported by Rayern (`billing` block of `GET /api/v1/admin/metrics`): MRR, ARR, active paid subscribers, free users, MRR by plan, plan/subscription breakdown, currency, data freshness (Rayern `generatedAt` + last successful sync) with explicit loading, unavailable and error states. Values are rendered exactly as reported — never recalculated client-side, never fabricated as zeros.
+- **Emails / Send Email** — admin-initiated sending only. Composer with From (fixed: `Rayern <support@rayern.com.ng>`), To, CC, BCC (any non-empty combination is sendable), Plain Text/HTML body mode with sandboxed preview, subject, email type; validation, sending state, success/failure feedback, and a bulk-safe send history (audience counts, mode, copy as new). **Campaign composer with recipient selection**: filter users by plan, subscription status and marketing consent; choose all-eligible, a filtered segment or individuals; preview the audience (eligible count, server-side skip reasons) before sending. Promotional campaigns only ever reach opted-in accounts — eligibility is revalidated server-side by Rayern, so the picker can never widen the audience; non-promotional service notices use the existing individual-recipient pipeline. Send results show accepted/failed/skipped per recipient ("accepted" = accepted by the provider, never "delivered").
 - **System** — overall status, service availability (uptime, latency), request volume, latency percentiles, recent failures, Rayern sync status.
 - **Errors** — searchable error list with severity, service/endpoint, status code, occurrences; detail drawer with trace ID.
 - **Observability** — OpenTelemetry-focused: service telemetry, error-rate trend, recent slow operations, trace/span explorer.
