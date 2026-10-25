@@ -6,8 +6,6 @@ vi.mock('../rayernSync', () => ({
   readSyncedAggregates: vi.fn(),
 }))
 
-import { readSyncedAggregates } from '../rayernSync'
-
 describe('billingService consumes Rayern sync data', () => {
   it('returns null when no billing block has been synchronized', async () => {
     vi.mocked(readSyncedAggregates).mockResolvedValue({

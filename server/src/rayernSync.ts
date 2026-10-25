@@ -1,5 +1,4 @@
 import { z } from 'zod'
-import type { AdminMetricPayload } from './types'
 
 /**
  * Approved aggregate contract for the Rayern pull-sync.
@@ -92,7 +91,7 @@ export const SyncPayload = z.object({
         definition: z.string(),
       }),
       planBreakdown: untrackedList(PlanBreakdownEntry, 20),
-      definitions: z.record(z.unknown()),
+      definitions: z.record(z.string(), z.unknown()),
     })
     .nullable()
     .optional(),
@@ -111,7 +110,7 @@ export const SyncPayload = z.object({
     .max(20)
     .nullable()
     .optional(),
-  telemetry: z.record(z.unknown()).nullable().optional(),
+  telemetry: z.record(z.string(), z.unknown()).nullable().optional(),
 })
 
 export type SyncPayloadData = z.infer<typeof SyncPayload>
@@ -282,3 +281,128 @@ export async function readSyncedAggregates(): Promise<{
 
 // Re-export query because this module already owns the persistence helpers.
 import { query } from './db'
+import { config, rayernSyncEnabled } from './config'
+
+/* ------------------- Restored payload/sync observability ------------------ */
+
+/**
+ * Describes the SHAPE of a Rayern payload for operational logging: which
+ * top-level keys/flags are present. Never logs values, tokens, or any
+ * customer/personal data.
+ */
+export function describeSyncShape(raw: unknown): string {
+  if (typeof raw !== 'object' || raw === null) return `root:${typeof raw}`
+  const obj = raw as Record<string, unknown>
+  const flags: string[] = []
+  if (typeof obj.success === 'boolean') flags.push(`success=${obj.success}`)
+  const container = unwrapRayernEnvelope(raw)
+  const inner = container.ok && typeof container.value === 'object' && container.value !== null ? (container.value as Record<string, unknown>) : {}
+  if ('data' in obj) flags.push('hasData=true')
+  if (inner.accounts !== undefined) flags.push('accounts=true')
+  if (inner.workspaces !== undefined) flags.push('workspaces=true')
+  if (Array.isArray(inner.services)) flags.push(`services=${inner.services.length}`)
+  if (Object.keys(inner).length === 0) flags.push('container=empty')
+  return flags.join(' ') || 'unrecognized'
+}
+
+/**
+ * Human-readable interval for the startup log, derived from the ACTUAL
+ * configured value so the log can never disagree with the schedule:
+ *   1_800_000 → "30m" · 600_000 → "10m" · 4_000 → "4s"
+ */
+export function formatIntervalMs(ms: number): string {
+  const minutes = ms / 60_000
+  if (Number.isInteger(minutes) && minutes >= 1) return `${minutes}m`
+  const seconds = Math.round(ms / 1000)
+  return seconds >= 60 ? `${Math.round(minutes)}m` : `${seconds}s`
+}
+
+/* ------------------------------ Sync state I/O ----------------------------- */
+
+interface SyncStatusRow {
+  last_attempt_at: Date | null
+  last_success_at: Date | null
+  last_failure_at: Date | null
+  last_error: string | null
+  consecutive_failures: number
+  enabled: boolean
+  last_duration_ms: number | null
+  last_http_status: number | null
+}
+
+async function readSyncStatus(): Promise<SyncStatusRow | null> {
+  const rows = await query<SyncStatusRow>(
+    `SELECT last_attempt_at, last_success_at, last_failure_at, last_error, consecutive_failures, enabled,
+            last_duration_ms, last_http_status
+     FROM sync_status WHERE id = 1`,
+  )
+  return rows[0] ?? null
+}
+
+/** Last observed Rayern HTTP status for the most recent attempt (fallback for
+ * reads before the first persisted flush). Only set when an actual HTTP
+ * response was received — null means transport failure/timeout. */
+let lastHttpStatus: number | null = null
+let running = false
+let rateLimitedUntil = 0
+
+/**
+ * Shape returned by the /system overview for the sync-status card.
+ * Includes full operational sync observability: duration, last HTTP status,
+ * the timestamp of the last SUCCESSFULLY STORED data (distinct from the last
+ * attempt — a failed attempt never moves it), and any active rate-limit window.
+ */
+export async function getSyncStatus(): Promise<{
+  enabled: boolean
+  lastAttemptAt: string | null
+  lastSuccessAt: string | null
+  lastFailureAt: string | null
+  lastError: string | null
+  consecutiveFailures: number
+  stale: boolean
+  running: boolean
+  lastDurationMs: number | null
+  lastHttpStatus: number | null
+  dataUpdatedAt: string | null
+  intervalMs: number
+  rateLimitedUntil: string | null
+}> {
+  let row: SyncStatusRow | null = null
+  try {
+    row = await readSyncStatus()
+  } catch {
+    row = null
+  }
+  // Last timestamp at which valid aggregate data was actually WRITTEN — a
+  // failed sync (401/429/timeout/validation) never advances it, so "data age"
+  // honestly reflects the last known good state.
+  let dataUpdatedAt: string | null = null
+  try {
+    const rows = await query<{ updated_at: Date }>(
+      `SELECT max(updated_at) AS updated_at FROM rayern_sync_state`,
+    )
+    const at = rows[0]?.updated_at
+    if (at instanceof Date && !Number.isNaN(at.getTime())) dataUpdatedAt = at.toISOString()
+  } catch {
+    dataUpdatedAt = null
+  }
+  const lastSuccessAt = row?.last_success_at?.toISOString() ?? null
+  const stale =
+    rayernSyncEnabled() &&
+    (lastSuccessAt === null || Date.now() - new Date(lastSuccessAt).getTime() > config.rayern.intervalMs * 2.5)
+  return {
+    enabled: rayernSyncEnabled(),
+    lastAttemptAt: row?.last_attempt_at?.toISOString() ?? null,
+    lastSuccessAt,
+    lastFailureAt: row?.last_failure_at?.toISOString() ?? null,
+    lastError: row?.last_error ?? null,
+    consecutiveFailures: row?.consecutive_failures ?? 0,
+    stale,
+    running,
+    lastDurationMs: row?.last_duration_ms ?? null,
+    lastHttpStatus: row?.last_http_status ?? lastHttpStatus,
+    dataUpdatedAt,
+    intervalMs: config.rayern.intervalMs,
+    rateLimitedUntil: rateLimitedUntil > Date.now() ? new Date(rateLimitedUntil).toISOString() : null,
+  }
+}

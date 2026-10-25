@@ -1,24 +1,2 @@
-node_modules
-dist
-dist-ssr
-coverage
-*.local
-.DS_Store
-*.log
-
-# Environment / secrets (never commit)
-.env
-.env.*
-!.env.example
-
-# Build/tooling state
-*.tsbuildinfo
-
-# Server runtime artifacts
-server/node_modules
-server/dist
-
-# Client runtime artifacts
-client/node_modules
-client/dist
-client/dist-ssr
+# Ignore AI-generated artifact files (PR bodies, logs, screenshots)
+artifacts/

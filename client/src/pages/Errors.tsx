@@ -5,7 +5,6 @@ import { Badge, StatusBadge } from '../components/ui/Badge'
 import { Drawer } from '../components/ui/Drawer'
 import { Select } from '../components/ui/Input'
 import { EmptyState, ErrorState, LoadingBlock } from '../components/ui/states'
-import { Collapser } from '../components/Collapser'
 import { errorsService } from '../services/errors'
 import { useDebouncedValue } from '../hooks/useDebouncedValue'
 import { useQuery } from '../hooks/useQuery'
@@ -62,8 +61,6 @@ export function ErrorsPage() {
         ) : errors.length === 0 ? (
           <EmptyState title="No errors match" description="Adjust the search or severity filter." />
         ) : (
-          <Collapser total={errors.length} label="errors">
-            {(visibleCount) => (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -77,7 +74,7 @@ export function ErrorsPage() {
                 </tr>
               </thead>
               <tbody>
-                {errors.slice(0, visibleCount).map((e) => (
+                {errors.map((e) => (
                   <tr
                     key={e.id}
                     className="cursor-pointer border-b border-ink-100 last:border-0 hover:bg-ink-50/70"
@@ -97,8 +94,6 @@ export function ErrorsPage() {
               </tbody>
             </table>
           </div>
-            )}
-          </Collapser>
         )}
       </Card>
 

@@ -1,24 +1,102 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Card, CardBody, CardHeader } from '../components/ui/Card'
 import { KpiCard } from '../components/KpiCard'
-import { Badge } from '../components/ui/Badge'
-import { EmptyState, ErrorState, LoadingBlock } from '../components/ui/states'
-import { Select } from '../components/ui/Input'
-import { Pagination } from '../components/Pagination'
 import { SearchInput } from '../components/SearchInput'
-import { Listbox } from '../components/ui/Listbox'
-import { useQuery } from '../hooks/useQuery'
-import { useDebouncedValue } from '../hooks/useDebouncedValue'
+import { Pagination } from '../components/Pagination'
+import { Badge } from '../components/ui/Badge'
+import { Select } from '../components/ui/Input'
+import { EmptyState, ErrorState, LoadingBlock } from '../components/ui/states'
 import { workspacesService } from '../services/workspaces'
-import { formatDate, formatNumber } from '../lib/utils'
-import type { Workspace, Paged } from '../lib/types'
+import { useDebouncedValue } from '../hooks/useDebouncedValue'
+import { useQuery } from '../hooks/useQuery'
+import { formatDate, formatNumber, titleCase } from '../lib/utils'
+import type { Paged, Workspace, WorkspaceFilters } from '../lib/types'
 
-function badgeForStatus(status: Workspace['status']) {\n  return {\n    active: { label: 'Active', tone: 'green' as const },\n    archived: { label: 'Archived', tone: 'neutral' as const },\n    building: { label: 'Building', tone: 'amber' as const },\n    failed: { label: 'Failed', tone: 'red' as const },\n    pending: { label: 'Pending', tone: 'neutral' as const },\n  }[status]\n}
+const PAGE_SIZE = 12
 
-function tierBadgeFor(tier?: string): JSX.IntrinsicElements['span'] {\n  if (!tier) return null\n  return <Badge tone="blue">{tier}</Badge>\n}
+/**
+ * Workspace registrations: administrative metadata only (name, member count,
+ * plan, creation date). No per-workspace activity, owners' personal inboxes,
+ * or workspace contents are shown.
+ */
+export function WorkspacesPage() {
+  const [search, setSearch] = useState('')
+  const [plan, setPlan] = useState<WorkspaceFilters['plan']>('all')
+  const [page, setPage] = useState(1)
+  const debouncedSearch = useDebouncedValue(search)
 
-function trialBadgeFor(remainingDays?: number): JSX.IntrinsicElements['span'] {\n  if (remainingDays == null || remainingDays <= 0) return null\n  return <Badge tone="amber">{remainingDays}d trial left</Badge>\n}
+  useEffect(() => {
+    setPage(1)
+  }, [debouncedSearch, plan])
 
-export function WorkspacesPage() {\n  const [search, setSearch] = useState('')\n  const [status, setStatus] = useState<Workspace['status'] | 'all'>('all')\n  const [page, setPage] = useState(1)\n  const [pageSize] = useState(12)\n  const debouncedSearch = useDebouncedValue(search)
+  const statsQ = useQuery(() => workspacesService.stats())
+  const listQ = useQuery(
+    () => workspacesService.list({ search: debouncedSearch, plan, page, pageSize: PAGE_SIZE }),
+    [debouncedSearch, plan, page],
+  )
 
-  const statsQ = useQuery(() => workspacesService.stats())\n  const listQ = useQuery(\n    () => workspacesService.list({ page, pageSize, search: debouncedSearch || undefined }),\n    [debouncedSearch, page],\n  )\n\n  const data: Paged<Workspace> | null = listQ.data\n\n  return (\n    <div className="mx-auto max-w-7xl p-4 sm:p-6 space-y-6">\n      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-5">\n        <KpiCard label="Total" value={statsQ.data ? formatNumber(statsQ.data.total) : '—'} />\n        <KpiCard label="Active" value={statsQ.data ? formatNumber(statsQ.data.active) : '—'} tone="green" />\n        <KpiCard label="Archived" value={statsQ.data ? formatNumber(statsQ.data.archived) : '—'} tone="neutral" />\n        <KpiCard label="Building" value={statsQ.data ? formatNumber(statsQ.data.building) : '—'} tone="amber" />\n        <KpiCard label="Failed" value={statsQ.data ? formatNumber(statsQ.data.failed) : '—'} tone="red" />\n      </div>\n\n      <Card>\n        <CardHeader\n          title="Workspaces"\n          subtitle="Every workspace your platform manages — current billing tier and trial status shown where available"\n          actions={\n            <div className="flex flex-wrap items-center gap-2">\n              <SearchInput value={search} onChange={setSearch} placeholder="Search workspace…" className="w-64" />\n              <Select\n                aria-label="Filter by status"\n                value={status}\n                onChange={(e) => setStatus(e.target.value as Workspace['status'] | 'all')}\n                className="w-44"\n              >\n                <option value="all">All statuses</option>\n                <option value="active">Active</option>\n                <option value="building">Building</option>\n                <option value="failed">Failed</option>\n                <option value="pending">Pending</option>\n                <option value="archived">Archived</option>\n              </Select>\n            </div>\n          }\n        />\n        {listQ.loading ? (\n          <CardBody>\n            <LoadingBlock rows={6} />\n          </CardBody>\n        ) : listQ.error ? (\n          <ErrorState message={listQ.error} onRetry={listQ.refetch} />\n        ) : !data || data.items.length === 0 ? (\n          <EmptyState title="No workspaces found" description="Try adjusting your search or filters." />\n        ) : (\n          <div className="space-y-3">\n            <div className="overflow-x-auto">\n              <table className="w-full text-sm">\n                <thead>\n                  <tr className="border-b border-ink-200 bg-ink-50/60 text-left text-[11px] font-semibold uppercase tracking-wide text-ink-500">\n                    <th scope="col" className="px-4 py-2.5">Workspace</th>\n                    <th scope="col" className="px-3 py-2.5">Owner</th>\n                    <th scope="col" className="px-3 py-2.5">Tier</th>\n                    <th scope="col" className="px-3 py-2.5">Trial</th>\n                    <th scope="col" className="px-3 py-2.5">Status</th>\n                    <th scope="col" className="px-3 py-2.5">Created</th>\n                  </tr>\n                </thead>\n                <tbody>\n                  {data.items.map((ws) => (\n                    <tr key={ws.id} className="border-b border-ink-100 last:border-0 hover:bg-ink-50/70">\n                      <td className="px-4 py-2.5">\n                        <div className="flex items-center gap-3">\n                          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-ink-100 text-xs font-semibold text-ink-600">\n                            {ws.name.slice(0, 2).toUpperCase()}\n                          </span>\n                          <div className="min-w-0">\n                            <p className="truncate font-medium text-ink-900">{ws.name}</p>\n                          </div>\n                        </div>\n                      </td>\n                      <td className="px-3 py-2.5 text-ink-600">{ws.owner}</td>\n                      <td className="px-3 py-2.5">{tierBadgeFor(undefined)}</td>\n                      <td className="px-3 py-2.5">{trialBadgeFor(undefined)}</td>\n                      <td className="px-3 py-2.5">\n                        <Badge {...badgeForStatus(ws.status)}>{badgeForStatus(ws.status).label}</Badge>\n                      </td>\n                      <td className="px-3 py-2.5 text-ink-600">{formatDate(ws.createdAt)}</td>\n                    </tr>\n                  ))}\n                </tbody>\n              </table>\n            </div>\n            <Pagination page={data.page} pageSize={data.pageSize} total={data.total} onPageChange={setPage} />\n          </div>\n        )}\n      </Card>\n    </div>\n  )\n}
+  const data: Paged<Workspace> | null = listQ.data
+
+  return (
+    <div className="mx-auto max-w-7xl space-y-6 p-6">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
+        <KpiCard label="Total" value={statsQ.data ? formatNumber(statsQ.data.total) : '—'} />
+        <KpiCard label="New (30d)" value={statsQ.data ? formatNumber(statsQ.data.newWorkspaces30d) : '—'} tone="green" />
+        <KpiCard label="Avg members" value={statsQ.data ? String(statsQ.data.avgMembersPerWorkspace) : '—'} />
+        <KpiCard label="Pro" value={statsQ.data ? formatNumber(statsQ.data.proWorkspaces) : '—'} tone="default" />
+        <KpiCard label="Team" value={statsQ.data ? formatNumber(statsQ.data.teamWorkspaces) : '—'} />
+      </div>
+
+      <Card>
+        <CardHeader
+          title="Workspace registrations"
+          subtitle="Administrative overview — workspace contents and activity are never shown here"
+          actions={
+            <div className="flex flex-wrap items-center gap-2">
+              <SearchInput value={search} onChange={setSearch} placeholder="Search workspace name…" className="w-64" />
+              <Select aria-label="Filter by plan" value={plan} onChange={(e) => setPlan(e.target.value as WorkspaceFilters['plan'])} className="w-36">
+                <option value="all">All plans</option>
+                <option value="free">Free</option>
+                <option value="pro">Pro</option>
+                <option value="team">Team</option>
+              </Select>
+            </div>
+          }
+        />
+        {listQ.loading ? (
+          <CardBody><LoadingBlock rows={8} /></CardBody>
+        ) : listQ.error ? (
+          <ErrorState message={listQ.error} onRetry={listQ.refetch} />
+        ) : !data || data.items.length === 0 ? (
+          <EmptyState title="No workspaces found" description="Try adjusting your search or filters." />
+        ) : (
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-ink-200 bg-ink-50/60 text-left text-[11px] font-semibold uppercase tracking-wide text-ink-500">
+                    <th scope="col" className="px-4 py-2.5">Workspace</th>
+                    <th scope="col" className="px-3 py-2.5 text-right">Members</th>
+                    <th scope="col" className="px-3 py-2.5">Created</th>
+                    <th scope="col" className="px-3 py-2.5">Plan</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.items.map((w) => (
+                    <tr key={w.id} className="border-b border-ink-100 last:border-0 hover:bg-ink-50/70">
+                      <td className="px-4 py-2.5 font-medium text-ink-900">{w.name}</td>
+                      <td className="px-3 py-2.5 text-right text-ink-700">{formatNumber(w.memberCount)}</td>
+                      <td className="px-3 py-2.5 text-ink-600">{formatDate(w.createdAt)}</td>
+                      <td className="px-3 py-2.5"><Badge tone={w.plan === 'free' ? 'neutral' : w.plan === 'pro' ? 'blue' : 'green'}>{titleCase(w.plan)}</Badge></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <Pagination page={data.page} pageSize={data.pageSize} total={data.total} onPageChange={setPage} />
+          </>
+        )}
+      </Card>
+    </div>
+  )
+}
