@@ -1,81 +1,39 @@
-/**
- * Middleware: JWT admin authentication and rate limiting.
- * All dashboard data routes require a valid admin bearer token.
- */
-import type { NextFunction, Request, Response } from 'express'
-import jwt from 'jsonwebtoken'
+import type { Request, Response, NextFunction } from 'express'
 import { config } from './config'
 
-export interface AdminTokenPayload {
-  sub: string
-  email: string
-  name: string
-  role: string
-}
-
-declare global {
-  // eslint-disable-next-line @typescript-eslint/no-namespace
-  namespace Express {
-    interface Request {
-      admin?: AdminTokenPayload
-    }
+export interface AuthenticatedRequest extends Request {
+  user?: {
+    id: string
+    email: string
+    role: string
   }
 }
 
-export function signAdminToken(payload: AdminTokenPayload): string {
-  return jwt.sign(payload, config.jwtSecret, { expiresIn: '12h' })
-}
-
-export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
-  const header = req.headers.authorization ?? ''
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null
-  if (!token) {
-    res.status(401).json({ error: 'Unauthorized: missing admin token' })
+export function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
+  if (!req.user) {
+    res.status(401).json({
+      success: false,
+      error: { code: 'UNAUTHENTICATED', message: 'Authentication required' },
+    })
     return
   }
-  try {
-    req.admin = jwt.verify(token, config.jwtSecret) as AdminTokenPayload
-    next()
-  } catch {
-    res.status(401).json({ error: 'Unauthorized: invalid or expired token' })
-  }
+  next()
 }
 
-/* ------------------------------ Rate limiting ----------------------------- */
-
-interface Bucket {
-  count: number
-  resetAt: number
-}
-
-const buckets = new Map<string, Bucket>()
-
-/** In-memory fixed-window rate limiter, keyed by IP + route group. */
-export function rateLimit(opts: { windowMs: number; max: number; key?: string }) {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    const key = `${opts.key ?? 'global'}:${req.ip ?? 'unknown'}`
-    const now = Date.now()
-    const bucket = buckets.get(key)
-
-    if (!bucket || bucket.resetAt <= now) {
-      buckets.set(key, { count: 1, resetAt: now + opts.windowMs })
-      next()
-      return
-    }
-
-    bucket.count += 1
-    if (bucket.count > opts.max) {
-      res.status(429).json({ error: 'Too many requests. Slow down.' })
-      return
-    }
-    next()
+export function requireAdmin(req: AuthenticatedRequest, res: Response, next: NextFunction): void {
+  if (!req.user) {
+    res.status(401).json({
+      success: false,
+      error: { code: 'UNAUTHENTICATED', message: 'Authentication required' },
+    })
+    return
   }
-}
-
-// Periodically clear expired buckets to avoid unbounded growth.
-setInterval(() => {
-  const now = Date.now()
-  for (const [key, bucket] of buckets) {
-    if (bucket.resetAt <= now) buckets.delete(key)
+  if (!config.adminEmails.includes(req.user.email.toLowerCase())) {
+    res.status(403).json({
+      success: false,
+      error: { code: 'ADMIN_ACCESS_REQUIRED', message: 'Admin access required' },
+    })
+    return
   }
-}, 60_000).unref()
+  next()
+}

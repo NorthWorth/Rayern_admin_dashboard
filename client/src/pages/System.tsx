@@ -24,7 +24,7 @@ import type { HealthStatus, HistoryRange, RayernSyncStatus, ServiceHealth, Syste
 function kpiTone(status: HealthStatus | undefined): 'default' | 'green' | 'amber' | 'red' {
   if (!status) return 'default'
   const tone = healthTone(status)
-  return tone === 'neutral' ? 'default' : tone
+  return tone === 'default' ? 'default' : tone
 }
 
 const RANGES: HistoryRange[] = ['24h', '7d', '30d']

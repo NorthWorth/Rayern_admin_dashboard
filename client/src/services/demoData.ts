@@ -1,697 +1,124 @@
-/**
- * Demo data layer for the admin dashboard.
- *
- * Everything here is generated deterministically and exists ONLY so the UI can
- * be built and reviewed before the dedicated dashboard backend is wired up.
- * When VITE_ADMIN_API_URL is configured, services switch to real endpoints and
- * this module is no longer used by the UI.
- *
- * PRIVACY: the dataset intentionally contains no customer workspace content —
- * no clients, leads, projects, tasks, documents, meetings, or activity data.
- * Only account-level and aggregate platform information is represented.
- */
-
 import type {
-  AuditEvent,
-  CampaignRecord,
-  ConsentStatus,
-  DependencyHealth,
-  DirectoryEntry,
+  AuditRow,
+  BillingEstimate,
+  EmailBodyType,
   EmailMessage,
   EmailStats,
-  EmailType,
   EmailUsage,
-  ErrorEntry,
-  ErrorSeverity,
-  HealthTransition,
+  EmailUsageWindow,
   HistoryRange,
-  MarketingMetrics,
-  ObservabilityOverview,
-  PlatformMetricsOverview,
-  RecentFailure,
-  ServiceHealth,
+  MarketingCampaign,
+  MarketingEvent,
+  ObservabilityIncident,
+  PlatformMetric,
   ServiceHistory,
+  ServiceHistoryPoint,
   SystemOverview,
-  TelemetryFreshnessInfo,
   User,
   UserStats,
   Workspace,
   WorkspaceStats,
 } from '../lib/types'
 
-/* ------------------------------ Deterministic RNG ------------------------- */
+// ------------------------------------------------------------------
+// Shared helpers
+// ------------------------------------------------------------------
 
-function mulberry32(seed: number): () => number {
-  let a = seed
-  return () => {
-    a |= 0
-    a = (a + 0x6d2b79f5) | 0
-    let t = Math.imul(a ^ (a >>> 15), 1 | a)
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-  }
-}
+function uid(seed: string): string {\n  let hash = 0\n  for (let i = 0; i < seed.length; i++) {\n    const c = seed.charCodeAt(i)\n    hash = (hash * 31 + c) | 0\n  }\n  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (ch) => {\n    const r = (hash + Math.random() * 16) % 16\n    return (ch === 'x' ? r : (r & 0x3) | 0x8).toString(16)\n  })\n}
 
-const rand = mulberry32(20260920)
-function pick<T>(arr: readonly T[]): T {
-  return arr[Math.floor(rand() * arr.length)] as T
-}
-function randInt(min: number, max: number): number {
-  return Math.floor(rand() * (max - min + 1)) + min
-}
-function chance(p: number): boolean {
-  return rand() < p
-}
+const now = new Date()
+const today = now.toISOString().slice(0, 10)
 
-/* ---------------------------------- Names --------------------------------- */
+function daysAgo(n: number, sameTime = false): string {\n  const d = new Date(now)\n  d.setUTCDate(d.getUTCDate() - n)\n  return d.toISOString().slice(0, sameTime ? 19 : 10)\n}
 
-const FIRST = [
-  'Adaeze', 'Tunde', 'Chinedu', 'Amara', 'Ibrahim', 'Ngozi', 'Emeka', 'Fatima', 'Obi', 'Zainab',
-  'Kelechi', 'Aisha', 'Yusuf', 'Chiamaka', 'Damilola', 'Oluwaseun', 'Halima', 'Ifeanyi', 'Bola', 'Nneka',
-  'Segun', 'Uche', 'Amina', 'Tobi', 'Ejiro', 'Hauwa', 'Kunle', 'Ladi', 'Musa', 'Oge',
-  'Ruth', 'Sadiq', 'Temi', 'Uzoma', 'Wale', 'Yemi', 'Bisi', 'Chuka', 'Deji', 'Efe',
-]
-const LAST = [
-  'Okafor', 'Balogun', 'Eze', 'Abubakar', 'Nwosu', 'Adeyemi', 'Mohammed', 'Obi', 'Okonkwo', 'Bello',
-  'Ibrahim', 'Chukwu', 'Lawal', 'Ogun', 'Danjuma', 'Afolabi', 'Igwe', 'Sule', 'Umeh', 'Yakubu',
-  'Onyeka', 'Salihu', 'Ojo', 'Etim', 'Nnaji',
-]
-const WORKSPACE_NAMES = [
-  'Studio A', 'Studio B', 'Studio C', 'Studio D', 'Studio E', 'Studio F',
-  'Studio G', 'Studio H', 'Studio I', 'Studio J', 'Studio K', 'Studio L',
-]
+function isoNow(addDays = 0, addMs = 0): string {\n  const d = new Date(now.getTime() + addDays * 86400000 + addMs)\n  return d.toISOString()\n}
 
-function makeEmail(name: string, n: number): string {
-  const slug = name.toLowerCase().replace(/[^a-z]+/g, '.')
-  const domains = ['gmail.com', 'yahoo.com', 'outlook.com', 'icloud.com', 'proton.me']
-  return `${slug}${n % 3 === 0 ? randInt(2, 99) : ''}@${pick(domains)}`
-}
+// ------------------------------------------------------------------
+// Users
+// ------------------------------------------------------------------
 
-/* --------------------------------- Users ---------------------------------- */
+export function buildUsers(seed = 'users'): User[] {\n  const names = [\n    'Ada Lovelace', 'Grace Hopper', 'Margaret Hamilton', 'Annie Easley',\n    'Katherine Johnson', 'Mary Jackson', 'Hedy Lamarr', 'Radia Perlman',\n    'Elizabeth Feinler', 'Sister Mary Kenneth Keller', 'Frances Allen',\n    'Shafi Goldwasser', 'Barbara Liskov', 'Donna Dubinsky',\n  ]\n  const roles = ['Owner', 'Admin', 'Member']\n  return names.map((name, i) => {\n    const email = `user${i + 1}@rayern.com.ng`\n    const created = daysAgo(30 - i, true)\n    return {\n      id: uid(name),\n      name,\n      email,\n      role: roles[i % roles.length],\n      status: i < 9 ? 'active' : i === 9 ? 'suspended' : 'closed',\n      verification: i < 7 ? 'verified' : i === 7 ? 'pending' : 'unverified',\n      createdAt: created,\n    }\n  })\n}
 
-export function buildUsers(): User[] {
-  const users: User[] = []
-  for (let i = 0; i < 86; i++) {
-    const name = `${pick(FIRST)} ${pick(LAST)}`
-    const createdDaysAgo = randInt(0, 150)
-    const verification = createdDaysAgo > 3 ? (chance(0.72) ? 'verified' : 'unverified') : chance(0.4) ? 'verified' : 'pending'
-    const status = createdDaysAgo > 100 && chance(0.08) ? 'suspended' : chance(0.03) ? 'closed' : 'active'
-    users.push({
-      id: `usr_${String(i + 1).padStart(3, '0')}`,
-      name,
-      email: makeEmail(name, i),
-      verification: verification as User['verification'],
-      status: status as User['status'],
-      createdAt: daysAgo(createdDaysAgo),
-    })
-  }
-  return users.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-}
+export function buildUserStats(_users: User[]): UserStats {\n  return {\n    totalUsers: 12,\n    newUsers7d: 2,\n    verified: 7,\n    unverified: 3,\n    deleted30d: 1,\n  }\n}
 
-function daysAgo(days: number): string {
-  const d = new Date()
-  d.setDate(d.getDate() - days)
-  d.setHours(randInt(8, 20), randInt(0, 59), 0, 0)
-  return d.toISOString()
-}
+// ------------------------------------------------------------------
+// Workspaces
+// ------------------------------------------------------------------
 
-export function buildUserStats(users: User[]): UserStats {
-  const now = Date.now()
-  const sevenDays = 7 * 24 * 3600 * 1000
-  const thirtyDays = 30 * 24 * 3600 * 1000
-  return {
-    totalUsers: users.length,
-    newUsers7d: users.filter((u) => now - new Date(u.createdAt).getTime() < sevenDays).length,
-    verified: users.filter((u) => u.verification === 'verified').length,
-    unverified: users.filter((u) => u.verification !== 'verified').length,
-    deleted30d: users.filter((u) => u.status === 'closed' && now - new Date(u.createdAt).getTime() < thirtyDays).length,
-  }
-}
+export function buildWorkspaces(seed = 'workspaces'): Workspace[] {\n  const items = [\n    { name: 'Alpha Inc.', owner: 'Ada Lovelace', status: 'active' as const, oid: 'org-1' },\n    { name: 'Beta Ltd.', owner: 'Grace Hopper', status: 'active' as const, oid: 'org-2' },\n    { name: 'Gamma Co.', owner: 'Margaret Hamilton', status: 'archived' as const, oid: 'org-3' },\n    { name: 'Delta GmbH', owner: 'Annie Easley', status: 'building' as const, oid: 'org-4' },\n    { name: 'Epsilon SARL', owner: 'Katherine Johnson', status: 'failed' as const, oid: 'org-5' },\n    { name: 'Zeta Oy', owner: 'Mary Jackson', status: 'pending' as const, oid: 'org-6' },\n  ]\n  return items.map((item, i) => ({\n    id: `ws-${i + 1}`,\n    name: item.name,\n    status: item.status,\n    ownerId: `user-${i + 1}`,\n    owner: item.owner,\n    createdAt: isoNow(-i - 1, -Math.floor(Math.random() * 3600000)),\n  }))\n}
 
-/* ------------------------------- Workspaces ------------------------------- */
+export function buildWorkspaceStats(_items: Workspace[], _oid?: string): WorkspaceStats {\n  return { total: 6, active: 2, archived: 1, building: 1, failed: 1, pending: 1 }\n}
 
-export function buildWorkspaces(): Workspace[] {
-  const workspaces: Workspace[] = []
-  for (let i = 0; i < 32; i++) {
-    workspaces.push({
-      id: `wsp_${String(i + 1).padStart(3, '0')}`,
-      name: WORKSPACE_NAMES[i % WORKSPACE_NAMES.length] ?? 'Studio',
-      memberCount: randInt(1, 14),
-      createdAt: daysAgo(randInt(1, 200)),
-      plan: chance(0.3) ? 'pro' : chance(0.15) ? 'team' : 'free',
-    })
-  }
-  return workspaces.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-}
+// ------------------------------------------------------------------
+// System / observability
+// ------------------------------------------------------------------
 
-export function buildWorkspaceStats(workspaces: Workspace[]): WorkspaceStats {
-  const now = Date.now()
-  const thirtyDays = 30 * 24 * 3600 * 1000
-  const members = workspaces.reduce((s, w) => s + w.memberCount, 0)
-  return {
-    total: workspaces.length,
-    newWorkspaces30d: workspaces.filter((w) => now - new Date(w.createdAt).getTime() < thirtyDays).length,
-    avgMembersPerWorkspace: Math.round((members / workspaces.length) * 10) / 10,
-    proWorkspaces: workspaces.filter((w) => w.plan === 'pro').length,
-    teamWorkspaces: workspaces.filter((w) => w.plan === 'team').length,
-  }
-}
+export function buildSystemOverview(): SystemOverview {\n  return {\n    services: [\n      { name: 'api', state: 'healthy', uptime: 99.94, lastChange: daysAgo(2) },\n      { name: 'worker', state: 'healthy', uptime: 99.91, lastChange: daysAgo(5) },\n      { name: 'db', state: 'degraded', uptime: 99.78, lastChange: daysAgo(1) },\n      { name: 'cdn', state: 'healthy', uptime: 99.99, lastChange: daysAgo(12) },\n      { name: 'billing', state: 'down', uptime: 98.22, lastChange: daysAgo(10) },\n    ],\n    ranges: ['6h', '24h', '7d', '30d'] as HistoryRange[],\n  }\n}
 
-/* ----------------------------- Platform metrics --------------------------- */
+export function buildTransitions(range: HistoryRange): { service: string; from: 'healthy' | 'degraded' | 'down'; to: 'healthy' | 'degraded' | 'down'; at: string }[] {\n  const base = range === '30d' ? 30 : range === '7d' ? 7 : range === '24h' ? 1 : 0\n  return [\n    { service: 'db', from: 'healthy', to: 'degraded', at: isoNow(-1 * base, -1800000) },\n    { service: 'billing', from: 'healthy', to: 'down', at: isoNow(-10 * base, -3600000) },\n    { service: 'billing', from: 'down', to: 'degraded', at: isoNow(-9 * base, -1200000) },\n    { service: 'billing', from: 'degraded', to: 'down', at: isoNow(-8 * base, -2400000) },\n  ]\n}
 
-export function buildPlatformMetrics(users: User[], workspaces: Workspace[]): PlatformMetricsOverview {
-  const userStats = buildUserStats(users)
-  const wsStats = buildWorkspaceStats(workspaces)
+function ramp(count: number, healthy: number, degraded: number, down: number): ServiceHistoryPoint[] {\n  const out: ServiceHistoryPoint[] = []\n  for (let i = 0; i < count; i++) {\n    const frac = i / Math.max(1, count - 1)\n    out.push({\n      time: isoNow(-count + i, -(i % 60) * 60000).slice(0, 19).replace('T', ' '),\n      healthy: Math.round(healthy + (1 - frac) * 2),\n      degraded: Math.round(degraded + frac * 4),\n      down: Math.round(down + frac * 0.4),\n    })\n  }\n  return out\n}
 
-  const registrationsTrend = []
-  const today = new Date()
-  for (let i = 89; i >= 0; i--) {
-    const d = new Date(today)
-    d.setDate(d.getDate() - i)
-    registrationsTrend.push({ date: d.toISOString().slice(0, 10), count: randInt(1, 9) })
-  }
+export function buildServiceHistory(_service: string, range: HistoryRange): ServiceHistory {\n  const count = range === '30d' ? 30 : range === '7d' ? 7 : range === '24h' ? 24 : 6\n  return {\n    service: 'platform',\n    range,\n    metrics: [\n      {\n        name: 'Requests',\n        unit: 'req/s',\n        values: ramp(count, 820, 800, 760),\n      },\n      {\n        name: 'Latency p95',\n        unit: 'ms',\n        values: ramp(count, 180, 220, 340).map((p) => ({ ...p, healthy: 180 + Math.round(Math.random() * 20), degraded: 220 + Math.round(Math.random() * 30), down: 340 + Math.round(Math.random() * 50) })),\n      },\n      {\n        name: 'Errors',\n        unit: 'err/s',\n        values: ramp(count, 0, 2, 9).map((p) => ({ ...p, healthy: 0, degraded: 2 + Math.round(Math.random() * 2), down: 9 + Math.round(Math.random() * 3) })),\n      },\n    ],\n  }\n}
 
-  return {
-    registeredAccounts: userStats.totalUsers,
-    newAccounts30d: registrationsTrend.slice(-30).reduce((s, d) => s + d.count, 0),
-    verifiedAccounts: userStats.verified,
-    unverifiedAccounts: userStats.unverified,
-    deletedAccounts30d: userStats.deleted30d,
-    deletionRequestsPending: randInt(0, 3),
-    totalWorkspaces: wsStats.total,
-    newWorkspaces30d: wsStats.newWorkspaces30d,
-    registrationsTrend,
-    planBreakdown: [
-      { plan: 'free', count: wsStats.total - wsStats.proWorkspaces - wsStats.teamWorkspaces },
-      { plan: 'pro', count: wsStats.proWorkspaces },
-      { plan: 'team', count: wsStats.teamWorkspaces },
-    ],
-  }
-}
+export function buildObservabilityIncidents(): ObservabilityIncident[] {\n  return [\n    {\n      id: 'inc-1',\n      title: 'Elevated 5xx rate on api.west',\n      status: 'open',\n      severity: 'high',\n      source: 'sentry',\n      service: 'api',\n      startedAt: isoNow(-2, -7200000),\n      updatedAt: isoNow(-1, -3600000),\n      message: '5xx rate exceeded 1% for 5 minutes.',\n      assignment: { assignedTo: 'ops-oncall', notified: true },\n    },\n    {\n      id: 'inc-2',\n      title: 'DB connection pool exhaustion',\n      status: 'investigating',\n      severity: 'critical',\n      source: 'prometheus',\n      service: 'db',\n      startedAt: isoNow(-6, -1800000),\n      updatedAt: isoNow(-1, -1200000),\n      message: 'DB connections sustained above 90% of pool size.',\n      assignment: { assignedTo: 'dba-oncall', notified: true },\n    },\n    {\n      id: 'inc-3',\n      title: 'Billing worker backlog growing',\n      status: 'closed',\n      severity: 'medium',\n      source: 'opentelemetry',\n      service: 'worker',\n      startedAt: isoNow(-12, -4200000),\n      updatedAt: isoNow(-10, -3600000),\n      message: 'Backlog cleared after autoscaling trigger.',\n      assignment: { assignedTo: 'platform-oncall', notified: true },\n    },\n  ]\n}
 
-/* --------------------------------- Emails --------------------------------- */
+export function buildObservabilitySources(): PlatformMetric[] {\n  return [\n    { category: 'Sentry', metric: '5xx rate', series: Array.from({ length: 6 }, (_, i) => ({ time: daysAgo(5 - i, true).slice(0, 19).replace('T', ' '), value: 0.2 + i * 0.15 })) },\n    { category: 'Prometheus', metric: 'DB connections', series: Array.from({ length: 6 }, (_, i) => ({ time: daysAgo(5 - i, true).slice(0, 19).replace('T', ' '), value: 120 + i * 25 })) },\n    { category: 'OpenTelemetry', metric: 'Worker queue depth', series: Array.from({ length: 6 }, (_, i) => ({ time: daysAgo(5 - i, true).slice(0, 19).replace('T', ' '), value: 400 + i * 80 })) },\n  ]\n}
 
-const EMAIL_TYPES: EmailType[] = ['update', 'announcement', 'promotion', 'notice']
-const EMAIL_SUBJECTS: Record<EmailType, string[]> = {
-  update: ['Platform update: new exports', 'Rayern update — June release notes', 'Improved workspace management is live'],
-  announcement: ['Scheduled maintenance notice', 'Upcoming platform maintenance window', 'Introducing Rayern Templates'],
-  promotion: ['Upgrade to Rayern Pro this month', 'Save 20% on annual plans', 'Team plan launch offer'],
-  notice: ['Important: security improvements', 'Action required: billing details', 'End-of-year platform schedule'],
-}
+// ------------------------------------------------------------------
+// Emails
+// ------------------------------------------------------------------
 
-export function buildEmails(): EmailMessage[] {
-  const emails: EmailMessage[] = []
-  for (let i = 0; i < 40; i++) {
-    const type = chance(0.35) ? 'update' : chance(0.3) ? 'announcement' : chance(0.5) ? 'promotion' : 'notice'
-    const status = chance(0.86) ? 'delivered' : chance(0.5) ? 'sent' : chance(0.6) ? 'failed' : 'bounced'
-    const recipient = `${pick(FIRST).toLowerCase()}.${pick(LAST).toLowerCase()}${randInt(1, 99)}@${pick(['gmail.com', 'yahoo.com', 'outlook.com'])}`
-    const ccCount = chance(0.3) ? randInt(1, 2) : 0
-    const bccCount = chance(0.25) ? randInt(1, 4) : 0
-    emails.push({
-      id: `eml_${String(i + 1).padStart(3, '0')}`,
-      resendId: `re_${[...Array(10)].map(() => 'abcdefghijklmnopqrstuvwxyz0123456789'[randInt(0, 35)]).join('')}`,
-      to: [recipient],
-      cc: Array.from({ length: ccCount }, () => makeEmail(pick(FIRST), i + 400)),
-      bcc: Array.from({ length: bccCount }, () => makeEmail(pick(FIRST), i + 500)),
-      subject: pick(EMAIL_SUBJECTS[type]),
-      bodyType: chance(0.35) ? 'html' : 'text',
-      type,
-      status: status as EmailMessage['status'],
-      sentAt: minutesAgo(randInt(3, 60 * 24 * 30)),
-    })
-  }
-  return emails.sort((a, b) => b.sentAt.localeCompare(a.sentAt))
-}
+export function buildEmails(seed = 'emails'): EmailMessage[] {\n  const types: EmailBodyType[] = ['text', 'html', 'text', 'html']\n  const statuses: EmailMessage['status'][] = ['sent', 'delivered', 'delivered', 'failed', 'bounced', 'sent']\n  const subjects = [\n    'Q4 product update is live',\n    'Maintenance window this Saturday',\n    'Your invoice is ready',\n    'New team invite: Rayern Studio',\n    'Welcome to Rayern — next steps',\n    'Survey: help us improve onboarding',\n  ]\n  const messages = [\n    'Hi team, the Q4 update shipped today. Highlights: dark mode, bulk actions, and faster exports.',\n    'We will perform scheduled maintenance on Saturday 02:00–04:00 UTC. Expect brief downtime.',\n    'Your latest invoice is attached. Let us know if anything looks off.',\n    'Someone invited you to collaborate on Rayern Studio. Accept the invite in your dashboard.',\n    'Welcome aboard! Here are a few steps to get the most out of your account.',\n    'We would love your feedback on the new onboarding flow. It takes about 2 minutes.',\n  ]\n  return Array.from({ length: 12 }, (_, i) => {\n    const type = i % 4 === 0 ? 'update' : i % 4 === 1 ? 'announcement' : i % 4 === 2 ? 'promotion' : 'notice'\n    const bodyType = types[i % types.length]\n    const status = statuses[i % statuses.length]\n    return {\n      id: `email-${i + 1}`,\n      resendId: `re_${uid('resend-' + i)}`,\n      type: type as EmailMessage['type'],\n      bodyType,\n      from: 'no-reply@rayern.com.ng',\n      to: [`user${(i % 6) + 1}@rayern.com.ng`],\n      cc: i % 3 === 0 ? ['ops@rayern.com.ng'] : [],\n      bcc: i % 5 === 0 ? ['audit@rayern.com.ng'] : [],\n      subject: subjects[i % subjects.length],\n      message: messages[i % messages.length],\n      status,\n      sentAt: isoNow(-i, -(i % 86400) * 1000),\n      error: status === 'failed' || status === 'bounced' ? 'Temporary provider issue; will retry.' : undefined,\n    }\n  })\n}
 
-function minutesAgo(minutes: number): string {
-  return new Date(Date.now() - minutes * 60000).toISOString()
-}
+export function buildEmailStats(emails: EmailMessage[]): EmailStats {\n  const totalSent = emails.length\n  const delivered = emails.filter((e) => e.status === 'delivered' || e.status === 'sent').length\n  const failed = emails.filter((e) => e.status === 'failed').length\n  const bounced = emails.filter((e) => e.status === 'bounced').length\n  const byType: Record<string, number> = {}\n  for (const e of emails) {\n    byType[e.type] = (byType[e.type] ?? 0) + 1\n  }\n  const daily: { date: string; sent: number; failed: number }[] = []\n  for (let d = 29; d >= 0; d--) {\n    const date = daysAgo(d)\n    const sent = Math.max(0, Math.round(3 + Math.random() * 8))\n    const fail = Math.round(sent * (Math.random() * 0.1))\n    daily.push({ date, sent, failed: fail })\n  }\n  return {\n    totalSent,\n    delivered,\n    failed,\n    bounced,\n    byType: Object.entries(byType).map(([type, count]) => ({ type: type as EmailStats['byType'][0]['type'], count })),\n    daily,\n  }\n}
 
-export function buildEmailStats(emails: EmailMessage[]): EmailStats {
-  const byType = EMAIL_TYPES.map((type) => ({ type, count: emails.filter((e) => e.type === type).length * 37 }))
-  const daily = []
-  for (let i = 29; i >= 0; i--) {
-    const d = new Date()
-    d.setDate(d.getDate() - i)
-    daily.push({ date: d.toISOString().slice(0, 10), sent: randInt(6, 32), failed: randInt(0, 3) })
-  }
-  const totalSent = daily.reduce((s, d) => s + d.sent, 0)
-  return {
-    totalSent,
-    delivered: Math.round(totalSent * 0.94),
-    failed: daily.reduce((s, d) => s + d.failed, 0),
-    bounced: Math.round(totalSent * 0.012),
-    byType,
-    daily,
-  }
-}
+export function buildEmailUsage(): EmailUsage {\n  const monthLimit = 5000\n  const monthUsed = 3872\n  const dayLimit = 250\n  const dayUsed = 178\n  return {\n    month: {\n      used: monthUsed,\n      remaining: monthLimit - monthUsed,\n      limit: monthLimit,\n      usedPct: monthUsed / monthLimit,\n    },\n    day: {\n      used: dayUsed,\n      remaining: dayLimit - dayUsed,\n      limit: dayLimit,\n      usedPct: dayUsed / dayLimit,\n    },\n    limits: { monthly: monthLimit, daily: dayLimit },\n    lastReconciledAt: today + 'T12:00:00Z',\n  }\n}
 
-export function buildSentEmail(payload: {
-  subject: string
-  to: string[]
-  cc: string[]
-  bcc: string[]
-  bodyType?: EmailMessage['bodyType']
-}): EmailMessage {
-  return {
-    id: `eml_${Date.now()}`,
-    resendId: `re_demo${Date.now().toString(36)}`,
-    to: payload.to,
-    cc: payload.cc,
-    bcc: payload.bcc,
-    subject: payload.subject,
-    bodyType: payload.bodyType ?? 'text',
-    type: 'announcement',
-    status: 'queued',
-    sentAt: new Date().toISOString(),
-  }
-}
+export function buildSentEmail({ subject, to, cc, bcc, bodyType }: { subject: string; to: string[]; cc?: string[]; bcc?: string[]; bodyType: EmailBodyType }): EmailMessage {\n  return {\n    id: uid('sent'),\n    resendId: `re_${uid('sent-' + Date.now())}`,\n    type: 'update',\n    bodyType,\n    from: 'no-reply@rayern.com.ng',\n    to: to || ['user1@rayern.com.ng'],\n    cc: cc ?? [],\n    bcc: bcc ?? [],\n    subject: subject || 'New message',\n    message: 'This is a preview of the sent email.',\n    status: 'queued',\n    sentAt: isoNow(0, 0),\n  }\n}
 
-/* ------------------------------- Email usage ------------------------------- */
+// ------------------------------------------------------------------
+// Marketing
+// ------------------------------------------------------------------
 
-/** Demo usage consistent with the Free-plan defaults (3,000/mo, 100/day). */
-export function buildEmailUsage(): EmailUsage {
-  const monthUsed = 2_145
-  const dayUsed = 43
-  const win = (used: number, limit: number) => ({
-    used,
-    limit,
-    remaining: Math.max(0, limit - used),
-    usedPct: Number(((used / limit) * 100).toFixed(1)),
-  })
-  return {
-    month: win(monthUsed, 3_000),
-    day: win(dayUsed, 100),
-    computedAt: new Date().toISOString(),
-    lastReconciledAt: minutesAgo(30),
-    limits: { monthly: 3_000, daily: 100 },
-  }
-}
+export function buildCampaigns(): MarketingCampaign[] {\n  return [\n    { id: 'mc-1', name: 'Q4 launch announcement', channel: 'email', state: 'active', audience: 'all-users', scheduledAt: daysAgo(2, true), createdBy: 'Ada Lovelace', createdAt: daysAgo(5, true) },\n    { id: 'mc-2', name: 'Onboarding drip day 3', channel: 'email', state: 'active', audience: 'new-users', scheduledAt: daysAgo(1, true), createdBy: 'Grace Hopper', createdAt: daysAgo(4, true) },\n    { id: 'mc-3', name: 'Beta feedback request', channel: 'in-app', state: 'draft', audience: 'beta-users', createdBy: 'Margaret Hamilton', createdAt: daysAgo(2, true) },\n    { id: 'mc-4', name: 'US blackout window', channel: 'email', state: 'failed', audience: 'us-users', scheduledAt: daysAgo(7, true), createdBy: 'Annie Easley', createdAt: daysAgo(9, true) },\n    { id: 'mc-5', name: 'Security advisory', channel: 'email', state: 'completed', audience: 'all-users', scheduledAt: daysAgo(14, true), sentAt: daysAgo(13, true), createdBy: 'Katherine Johnson', createdAt: daysAgo(16, true) },\n  ]\n}
 
-/* --------------------------------- System --------------------------------- */
+export function buildEvents(): MarketingEvent[] {\n  return [\n    { id: 'ev-1', event: 'survey_response', platform: 'web', users: 214, createdAt: daysAgo(2, true) },\n    { id: 'ev-2', event: 'feature_adopted', platform: 'ios', users: 89, createdAt: daysAgo(2, true) },\n    { id: 'ev-3', event: 'feature_adopted', platform: 'android', users: 54, createdAt: daysAgo(3, true) },\n    { id: 'ev-4', event: 'campaign_sent', platform: 'web', users: 4120, createdAt: daysAgo(1, true) },\n  ]\n}
 
-function demoFreshness(status: TelemetryFreshnessInfo['status'] = 'fresh', ageMs = 45_000): TelemetryFreshnessInfo {
-  if (status === 'none' || ageMs === null) {
-    return { lastTelemetryAt: null, ageMs: null, status: 'none' }
-  }
-  return {
-    lastTelemetryAt: new Date(Date.now() - ageMs).toISOString(),
-    ageMs,
-    status,
-  }
-}
+export function buildStats(campaigns: MarketingCampaign[]): MarketingStats {\n  const byChannel: Record<string, number> = { email: 0, 'in-app': 0, sms: 0 }\n  for (const c of campaigns) byChannel[c.channel] = (byChannel[c.channel] ?? 0) + 1\n  return {\n    totalCampaigns: campaigns.length,\n    activeCampaigns: campaigns.filter((c) => c.state === 'active').length,\n    completedCampaigns: campaigns.filter((c) => c.state === 'completed').length,\n    failedCampaigns: campaigns.filter((c) => c.state === 'failed').length,\n    byChannel: Object.entries(byChannel).map(([channel, count]) => ({ channel: channel as MarketingCampaign['channel'], count })),\n  }\n}
 
-export function buildSystemOverview(): SystemOverview {
-  const base = {
-    reason: 'all metrics within thresholds',
-    dataSource: 'self' as const,
-    reportedStatus: null,
-    successCount: 4_812,
-    errorRatePct: 0.21,
-    rpm: 12,
-    slowCount: 3,
-    statusClasses: { c2: 4_796, c3: 16, c4: 12, c5: 4 },
-    freshness: demoFreshness(),
-    lastChange: null,
-    historyKey: null as string | null,
-  }
-  const services: ServiceHealth[] = [
-    { id: 'svc_dash', name: 'Dashboard API', kind: 'api', status: 'healthy', uptimePct30d: 99.97, latencyMsP50: 41, latencyMsP95: 96, lastIncidentAt: null, requestCount: 4_828, ...base, historyKey: 'dashboard-api' },
-    { id: 'svc_db', name: 'PostgreSQL', kind: 'database', status: 'healthy', uptimePct30d: 99.99, latencyMsP50: 12, latencyMsP95: 34, lastIncidentAt: daysAgo(34), requestCount: 9_410, ...base, historyKey: 'postgres' },
-    { id: 'svc_api', name: 'Rayern API', kind: 'api', status: 'healthy', uptimePct30d: 99.98, latencyMsP50: 84, latencyMsP95: 210, lastIncidentAt: daysAgo(19), requestCount: null, successCount: null, errorRatePct: null, rpm: null, slowCount: null, statusClasses: null, dataSource: 'rayern-sync', reportedStatus: null, reason: 'reported by Rayern with the latest successful sync', freshness: demoFreshness('fresh', 4 * 60_000), lastChange: null, historyKey: null },
-    { id: 'svc_replica', name: 'Read Replica', kind: 'database', status: 'degraded', uptimePct30d: 99.72, latencyMsP50: 28, latencyMsP95: 180, lastIncidentAt: minutesAgo(47), requestCount: null, successCount: null, errorRatePct: null, rpm: null, slowCount: null, statusClasses: null, dataSource: 'rayern-sync', reportedStatus: 'degraded', reason: 'reported by Rayern with the latest successful sync', freshness: demoFreshness('fresh', 4 * 60_000), lastChange: { at: minutesAgo(47), from: 'healthy', to: 'degraded', reason: 'replication lag above threshold' }, historyKey: null },
-    { id: 'svc_email', name: 'Resend (email sending)', kind: 'email', status: 'unknown', uptimePct30d: null, latencyMsP50: null, latencyMsP95: null, lastIncidentAt: null, requestCount: 0, successCount: 0, errorRatePct: null, rpm: 0, slowCount: 0, statusClasses: { c2: 0, c3: 0, c4: 0, c5: 0 }, dataSource: 'self', reportedStatus: null, reason: 'no telemetry observed yet', freshness: { lastTelemetryAt: null, ageMs: null, status: 'none' }, lastChange: null, historyKey: 'resend' },
-  ]
+// ------------------------------------------------------------------
+// Audit
+// ------------------------------------------------------------------
 
-  const requestVolume = []
-  for (let i = 47; i >= 0; i--) {
-    const time = new Date(Date.now() - i * 30 * 60000)
-    const hour = time.getHours()
-    const traffic = hour >= 8 && hour <= 19 ? 1 : 0.35
-    const count = Math.round(randInt(160, 240) * traffic)
-    requestVolume.push({ time: time.toISOString(), count, errors: Math.round(count * (rand() * 0.018)) })
-  }
+export function buildAuditRows(): AuditRow[] {\n  return [\n    { id: 'au-1', timestamp: daysAgo(2, true), actor: 'Ada Lovelace', actorEmail: 'ada@rayern.com.ng', action: 'workspace.create', entity: 'Workspace', entityId: 'ws-1', description: 'Created workspace Alpha Inc.' },\n    { id: 'au-2', timestamp: daysAgo(2, true), actor: 'Grace Hopper', actorEmail: 'grace@rayern.com.ng', action: 'user.invite', entity: 'User', entityId: 'user-2', description: 'Invited user Grace Hopper to Alpha Inc.' },\n    { id: 'au-3', timestamp: daysAgo(1, true), actor: 'Margaret Hamilton', actorEmail: 'margaret@rayern.com.ng', action: 'billing.upgrade', entity: 'Subscription', entityId: 'sub-1', description: 'Upgraded Alpha Inc. to Studio plan' },\n    { id: 'au-4', timestamp: daysAgo(1, true), actor: 'Annie Easley', actorEmail: 'annie@rayern.com.ng', action: 'workspace.archive', entity: 'Workspace', entityId: 'ws-3', description: 'Archived workspace Gamma Co.' },\n    { id: 'au-5', timestamp: daysAgo(0, true), actor: 'Katherine Johnson', actorEmail: 'katherine@rayern.com.ng', action: 'user.reset-password', entity: 'User', entityId: 'user-4', description: 'Password reset for Annie Easley' },\n  ]\n}
 
-  const recentFailures: RecentFailure[] = [
-    {
-      id: 'fail_1', service: 'Dashboard API', route: 'POST /emails/send', statusCategory: '5xx',
-      time: minutesAgo(2), firstSeenAt: minutesAgo(42), lastSeenAt: minutesAgo(2),
-      message: 'Upstream provider rejected the send payload', count: 3,
-    },
-    {
-      id: 'fail_2', service: 'Rayern Sync', route: 'GET /internal/dashboard-metrics', statusCategory: '429',
-      time: minutesAgo(38), firstSeenAt: minutesAgo(38), lastSeenAt: minutesAgo(38),
-      message: 'Rayern API responded with HTTP 429 (rate limited)', count: 1,
-    },
-    {
-      id: 'fail_3', service: 'Rayern API', route: 'GET /api/workspaces', statusCategory: '5xx',
-      time: minutesAgo(780), firstSeenAt: minutesAgo(780), lastSeenAt: minutesAgo(780),
-      message: '5xx spike on workspaces listing (rate limiter)', count: 27,
-    },
-  ]
+export function buildAuditStats(rows: AuditRow[]): { totalEvents: number; byAction: { action: string; count: number }[] } {\n  const map: Record<string, number> = {}\n  for (const r of rows) {\n    map[r.action] = (map[r.action] ?? 0) + 1\n  }\n  return {\n    totalEvents: rows.length,\n    byAction: Object.entries(map).map(([action, count]) => ({ action, count })),\n  }\n}
 
-  const dependencies: DependencyHealth[] = [
-    {
-      id: 'dep:postgresql', name: 'PostgreSQL', kind: 'database', status: 'healthy',
-      reason: 'all metrics within thresholds', availabilityPct: 99.99, requestCount: 9_410,
-      errorCount: 2, errorRatePct: 0.02, p95Ms: 34,
-      lastSuccessAt: minutesAgo(1), lastFailureAt: daysAgo(3), lastObservedAt: minutesAgo(1),
-      freshness: demoFreshness(), configured: true,
-      detail: [
-        { label: 'Probe', value: 'reachable in 3ms' },
-        { label: 'Pool', value: '4 open · 3 idle · 0 waiting' },
-        { label: 'Mode', value: 'managed' },
-      ],
-      historyKey: 'postgres',
-    },
-    {
-      id: 'dep:rayern-metrics', name: 'Rayern metrics endpoint', kind: 'api', status: 'healthy',
-      reason: 'all metrics within thresholds', availabilityPct: 100, requestCount: 48,
-      errorCount: 0, errorRatePct: 0, p95Ms: 412,
-      lastSuccessAt: minutesAgo(4), lastFailureAt: daysAgo(2), lastObservedAt: minutesAgo(4),
-      freshness: demoFreshness('fresh', 4 * 60_000), configured: true,
-      detail: [
-        { label: 'Pull interval', value: '30m' },
-        { label: 'Last pull', value: '412ms' },
-        { label: 'Last HTTP', value: '200' },
-        { label: 'Consecutive failures', value: '0' },
-        { label: 'Data updated', value: new Date(Date.now() - 4 * 60_000).toLocaleString() },
-      ],
-      historyKey: 'rayern-sync',
-    },
-    {
-      id: 'dep:resend', name: 'Resend (email sending)', kind: 'email', status: 'unknown',
-      reason: 'no telemetry observed yet', availabilityPct: null, requestCount: 0,
-      errorCount: 0, errorRatePct: null, p95Ms: null,
-      lastSuccessAt: null, lastFailureAt: null, lastObservedAt: null,
-      freshness: { lastTelemetryAt: null, ageMs: null, status: 'none' }, configured: true,
-      detail: [{ label: 'Observed via', value: 'admin-initiated sends (resend.send spans)' }],
-      historyKey: 'resend',
-    },
-  ]
+// ------------------------------------------------------------------
+// Errors
+// ------------------------------------------------------------------
 
-  return {
-    overall: 'degraded',
-    services,
-    dependencies,
-    requestVolume,
-    errorRatePct: 0.42,
-    requestCount24h: requestVolume.reduce((s, p) => s + p.count, 0),
-    latency: { p50: 86, p90: 148, p95: 224, p99: 410 },
-    recentFailures,
-    overallSummary: {
-      failing: [],
-      degraded: ['Read Replica'],
-      healthy: 4,
-      unknown: 1,
-    },
-    sync: {
-      enabled: true,
-      status: 'healthy' as const,
-      lastSuccessAt: minutesAgo(4),
-      lastAttemptAt: minutesAgo(4),
-      lastFailureAt: daysAgo(2),
-      lastError: null,
-      consecutiveFailures: 0,
-      stale: false,
-      running: false,
-      lastDurationMs: 412,
-      lastHttpStatus: 200,
-      dataUpdatedAt: minutesAgo(4),
-      intervalMs: 1_800_000,
-      rateLimitedUntil: null,
-    },
-    metricsSync: {
-      status: 'healthy' as const,
-      reason: 'pulls succeeding on schedule',
-      dataAgeMs: 4 * 60_000,
-    },
-    meta: {
-      processUptimeSec: 86_400,
-      dbLatencyMs: 3,
-      rssBytes: 148 * 1024 * 1024,
-      heapUsedBytes: 62 * 1024 * 1024,
-      heapTotalBytes: 96 * 1024 * 1024,
-      cpuPercent: 7.4,
-      eventLoopDelayP95Ms: 2.8,
-      pool: { total: 4, idle: 3, waiting: 0 },
-      telemetryStaleMs: 900_000,
-      healthThresholds: {
-        errorRateDegradedPct: 1,
-        errorRateFailingPct: 5,
-        latencyP95DegradedMs: 500,
-        latencyP95FailingMs: 2_000,
-      },
-    },
-  }
-}
+export function buildErrorGroups(): Array<{\n  id: string\n  message: string\n  status: 'open' | 'closed'\n  count: number\n  firstSeenAt: string\n  lastSeenAt: string\n  stacktraceFileId?: string\n}> {\n  return [\n    { id: 'grp-1', message: 'TypeError: Cannot read properties of undefined (reading \'id\')', status: 'open', count: 14, firstSeenAt: daysAgo(1, true), lastSeenAt: daysAgo(0, true), stacktraceFileId: 'st-1' },\n    { id: 'grp-2', message: 'POST /api/workspaces 500 (timeout)', status: 'open', count: 7, firstSeenAt: daysAgo(2, true), lastSeenAt: daysAgo(0, true) },\n    { id: 'grp-3', message: 'Unhandled promise rejection: ECONNREFUSED', status: 'closed', count: 3, firstSeenAt: daysAgo(4, true), lastSeenAt: daysAgo(3, true), stacktraceFileId: 'st-3' },\n  ]\n}
 
-/** Demo drill-down series: platform → service → metric → time range. */
-export function buildServiceHistory(service: string, range: HistoryRange): ServiceHistory {
-  const points = range === '30d' ? 30 : range === '7d' ? 168 : 24
-  const stepMs = range === '30d' ? 86_400_000 : 3_600_000
-  const out: ServiceHistory['points'] = []
-  for (let i = points - 1; i >= 0; i--) {
-    const empty = chance(0.12)
-    const requestCount = empty ? 0 : randInt(120, 900)
-    out.push({
-      time: new Date(Date.now() - i * stepMs).toISOString(),
-      requestCount,
-      errorCount: empty ? 0 : Math.round(requestCount * (rand() * 0.03)),
-      errorRatePct: empty ? null : Math.round(rand() * 300) / 100,
-      availabilityPct: empty ? null : Math.round((100 - rand() * 2) * 100) / 100,
-      p95Ms: empty ? null : randInt(80, 640),
-    })
-  }
-  return { service, range, points: out }
-}
+export function buildErrorTimeline(): Array<{\n  groupId: string\n  level: string\n  message: string\n  count?: number\n  at: string\n}> {\n  return [\n    { groupId: 'grp-1', level: 'error', message: 'TypeError: Cannot read properties of undefined', count: 9, at: daysAgo(1, true) },\n    { groupId: 'grp-1', level: 'error', message: 'TypeError: Cannot read properties of undefined', count: 5, at: daysAgo(0, true) },\n    { groupId: 'grp-2', level: 'error', message: 'POST /api/workspaces 500', count: 7, at: daysAgo(0, true) },\n  ]\n}
 
-/** Demo health-state transitions (the backend dedups real ones the same way). */
-export function buildTransitions(range: HistoryRange): HealthTransition[] {
-  const count = range === '24h' ? 4 : range === '7d' ? 9 : 14
-  const rows: HealthTransition[] = []
-  for (let i = 0; i < count; i++) {
-    const flip = i % 2 === 0
-    rows.push({
-      id: `tr_${i}`,
-      service: pick(['dashboard-api', 'postgres', 'rayern-sync', 'resend']),
-      from: flip ? 'healthy' : 'degraded',
-      to: flip ? 'degraded' : 'healthy',
-      reason: flip ? 'p95 latency 612ms ≥ degraded 500ms' : 'all metrics within thresholds',
-      metric: flip ? 'p95Ms' : '',
-      metricValue: flip ? 612 : null,
-      at: minutesAgo(randInt(10, range === '24h' ? 1_440 : range === '7d' ? 10_080 : 43_200)),
-    })
-  }
-  return rows.sort((a, b) => b.at.localeCompare(a.at))
-}
+// ------------------------------------------------------------------
+// Platform metrics
+// ------------------------------------------------------------------
 
-/* --------------------------------- Errors --------------------------------- */
+export function buildMetrics(): PlatformMetric[] {\n  return [\n    {\n      category: 'Usage',\n      metric: 'Active workspaces',\n      series: Array.from({ length: 30 }, (_, i) => ({ time: daysAgo(29 - i), value: 380 + i * 2 })),\n    },\n    {\n      category: 'Usage',\n      metric: 'Seat utilization',\n      series: Array.from({ length: 30 }, (_, i) => ({ time: daysAgo(29 - i), value: 72 + Math.round(3 * Math.sin(i / 4)) })),\n    },\n    {\n      category: 'Billing',\n      metric: 'MRR',\n      series: Array.from({ length: 30 }, (_, i) => ({ time: daysAgo(29 - i), value: 42000 + i * 400 })),\n    },\n    {\n      category: 'Billing',\n      metric: 'Overage seats',\n      series: Array.from({ length: 30 }, (_, i) => ({ time: daysAgo(29 - i), value: 12 + Math.round(Math.random() * 4) })),\n    },\n    {\n      category: 'Platform',\n      metric: 'API latency p95',\n      series: Array.from({ length: 30 }, (_, i) => ({ time: daysAgo(29 - i), value: 140 + Math.round(Math.random() * 40) })),\n    },\n    {\n      category: 'Platform',\n      metric: 'Error rate',\n      series: Array.from({ length: 30 }, (_, i) => ({ time: daysAgo(29 - i), value: 0.12 + Math.random() * 0.08 })),\n    },\n  ]\n}
 
-const ENDPOINTS = ['/api/auth/login', '/api/users', '/api/workspaces', '/api/projects', '/api/tasks', '/api/emails/send', '/api/files/upload', '/api/search']
-const ERROR_MESSAGES: Record<ErrorSeverity, string[]> = {
-  low: ['Slow query warning on aggregate collection', 'Deprecated API version called', 'Retry succeeded after backoff'],
-  medium: ['Failed to render aggregate summary', 'Webhook delivery returned 502', 'Token refresh failed for 3 sessions'],
-  high: ['Database timeout on aggregation query', 'Unhandled exception in export worker', 'Third-party webhook signature mismatch'],
-  critical: ['Connection pool exhausted', 'Primary database failover initiated', 'Queue backlog above critical threshold'],
-}
+// ------------------------------------------------------------------
+// Billing
+// ------------------------------------------------------------------
 
-export function buildErrors(): ErrorEntry[] {
-  const entries: ErrorEntry[] = []
-  const severities: ErrorSeverity[] = ['critical', 'high', 'medium', 'low']
-  for (let i = 0; i < 26; i++) {
-    const severity = severities[Math.floor(rand() * 4)] as ErrorSeverity
-    const status = severity === 'critical' ? 500 : pick([400, 401, 403, 404, 409, 422, 429, 500, 502, 503])
-    entries.push({
-      id: `err_${String(i + 1).padStart(3, '0')}`,
-      severity,
-      service: pick(['Rayern API', 'Dashboard API', 'Job Queue', 'Email Delivery']),
-      endpoint: pick(ENDPOINTS),
-      method: pick(['GET', 'POST', 'PATCH']),
-      statusCode: status,
-      statusClass: `${Math.floor(status / 100)}xx`,
-      message: pick(ERROR_MESSAGES[severity]),
-      traceId: chance(0.8) ? [...Array(16)].map(() => '0123456789abcdef'[randInt(0, 15)]).join('') : null,
-      count: randInt(1, 48),
-      firstSeenAt: minutesAgo(randInt(60, 60 * 24 * 14)),
-      lastSeenAt: minutesAgo(randInt(1, 120)),
-    })
-  }
-  return entries.sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt))
-}
+export function buildBilling(): {\n  currency: string\n  country: string\n  locale: string\n  amount: number\n} {\n  return { currency: 'USD', country: 'US', locale: 'en-US', amount: 1234 }\n}
 
-/* ------------------------------ Observability ----------------------------- */
+export function buildBillingEstimates(currentPeriod: string): BillingEstimate[] {\n  return [\n    {\n      tier: currentPeriod === '2025-Q1' ? 'desk' : 'studio',\n      period: currentPeriod as BillingEstimate['period'],\n      seats: 8,\n      billedSeats: 8,\n      estimateInCurrency: 8000,\n      estimateInUsd: 8000,\n    },\n    {\n      tier: currentPeriod === '2025-Q2' ? 'studio' : 'studio-plus',\n      period: currentPeriod as BillingEstimate['period'],\n      seats: 12,\n      billedSeats: 12,\n      estimateInCurrency: 14400,\n      estimateInUsd: 14400,\n    },\n    {\n      tier: currentPeriod === '2025-Q3' ? 'studio-plus' : 'desk',\n      period: currentPeriod as BillingEstimate['period'],\n      seats: 5,\n      billedSeats: 5,\n      estimateInCurrency: 4200,\n      estimateInUsd: 4200,\n    },\n  ]\n}
 
-const OPERATIONS = ['GET /aggregate/metrics', 'POST /auth/session', 'db.accounts.aggregate', 'queue.consume', 'email.send', 'cache.get', 'db.sessions.findOne']
+// ------------------------------------------------------------------
+// Shared date helpers re-exported for demo consistency
+// ------------------------------------------------------------------
 
-export function buildObservability(): ObservabilityOverview {
-  const services = ['rayern-api', 'dashboard-api', 'worker', 'email-service']
-  const serviceTelemetry = services.map((s) => {
-    const requestCount = randInt(4000, 22000)
-    const errorRatePct = Math.round(rand() * 220) / 100
-    const status = (chance(0.7) ? 'healthy' : chance(0.6) ? 'degraded' : chance(0.8) ? 'failing' : 'unknown') as ServiceHealth['status']
-    const errorCount = Math.round((requestCount * errorRatePct) / 100)
-    return {
-      service: s,
-      requestCount,
-      errorCount,
-      successCount: requestCount - errorCount,
-      errorRatePct,
-      p50: randInt(8, 90),
-      p95: randInt(120, 340),
-      p99: randInt(300, 900),
-      status,
-      freshness: status === 'unknown'
-        ? { lastTelemetryAt: new Date(Date.now() - 3 * 3_600_000).toISOString(), ageMs: 3 * 3_600_000, status: 'stale' as const }
-        : demoFreshness(),
-    }
-  })
-
-  const recentTraces = []
-  for (let i = 0; i < 24; i++) {
-    const traceId = [...Array(16)].map(() => '0123456789abcdef'[randInt(0, 15)]).join('')
-    const root = { service: pick(services), operation: pick(OPERATIONS) }
-    const spanCount = randInt(2, 4)
-    for (let s = 0; s < spanCount; s++) {
-      const hasError = chance(0.12)
-      recentTraces.push({
-        id: `span_${i}_${s}`,
-        traceId,
-        spanId: [...Array(8)].map(() => '0123456789abcdef'[randInt(0, 15)]).join(''),
-        parentSpanId: s === 0 ? null : 'root',
-        service: s === 0 ? root.service : pick(services),
-        operation: s === 0 ? root.operation : pick(OPERATIONS),
-        startTime: minutesAgo(randInt(1, 90)),
-        durationMs: Math.round(rand() * 480 + 6),
-        statusCode: hasError ? 500 : chance(0.5) ? 200 : 201,
-        hasError,
-      })
-    }
-  }
-  recentTraces.sort((a, b) => b.startTime.localeCompare(a.startTime))
-
-  const slowOperations = OPERATIONS.slice(0, 6).map((op, i) => {
-    const p95 = randInt(400, 1800)
-    return {
-      id: `slow_${i}`,
-      service: pick(services),
-      operation: op,
-      p95,
-      avgMs: Math.round(p95 * 0.45),
-      p99: Math.round(p95 * 1.6),
-      occurrences: randInt(12, 300),
-      lastSeenAt: minutesAgo(randInt(5, 600)),
-    }
-  }).sort((a, b) => b.p95 - a.p95)
-
-  const errorRateTrend = []
-  for (let i = 23; i >= 0; i--) {
-    errorRateTrend.push({ time: new Date(Date.now() - i * 3600 * 1000).toISOString(), errorRatePct: Math.round(rand() * 160) / 100 })
-  }
-
-  return { services: serviceTelemetry, recentTraces, slowOperations, errorRateTrend }
-}
-
-/* -------------------------------- Audit log ------------------------------- */
-
-const AUDIT_ACTIONS: Array<[string, string, 'admin' | 'system']> = [
-  ['email.sent', 'Rayern <support@rayern.com.ng>', 'admin'],
-  ['email.sent', 'Rayern <support@rayern.com.ng>', 'admin'],
-  ['email.sent', 'Rayern <support@rayern.com.ng>', 'admin'],
-  ['user.viewed', 'usr_042', 'admin'],
-  ['error.reviewed', 'err_017', 'admin'],
-  ['config.updated', 'dashboard.settings', 'admin'],
-  ['service.restarted', 'worker', 'system'],
-  ['backup.completed', 'primary-database', 'system'],
-  ['config.updated', 'alerting.rules', 'admin'],
-  ['service.deployed', 'dashboard-api v1.4.2', 'system'],
-]
-
-export function buildAuditEvents(): AuditEvent[] {
-  return AUDIT_ACTIONS.map(([action, target, actorKind], i) => {
-    const meta: Record<string, string> = {}
-    if (action === 'email.sent') {
-      meta.subject = pick(['Platform update: new exports', 'Scheduled maintenance notice'])
-      meta.recipients = String(randInt(1, 24))
-    } else if (action === 'user.viewed') {
-      meta.reason = 'support investigation'
-    } else if (action === 'config.updated') {
-      meta.section = pick(['alerts', 'retention', 'access'])
-    } else if (action === 'service.restarted') {
-      meta.reason = 'memory pressure'
-    }
-    return {
-      id: `aud_${String(i + 1).padStart(3, '0')}`,
-      actor: actorKind === 'admin' ? 'Admin (you)' : 'System',
-      actorKind,
-      action,
-      target,
-      timestamp: minutesAgo(i === 0 ? 4 : randInt(30, 60 * 24 * 21)),
-      metadata: meta,
-    }
-  })
-}
-
-/* -------------------------------- Marketing ------------------------------- */
-
-/**
- * Demo consent distribution over the demo accounts: every 10th account has
- * opted out, ~30% opted in, the rest unknown — mirrors the opt-in-only model
- * of the real backend (no consent record = never mailable).
- */
-export function buildMarketingDirectory(users: User[]): DirectoryEntry[] {
-  return users.map((u) => {
-    const roll = Math.floor(rand() * 10)
-    const consent: ConsentStatus = roll < 3 ? 'opted_in' : roll < 4 ? 'opted_out' : 'unknown'
-    return {
-      ...u,
-      consent,
-      consentUpdatedAt: consent === 'unknown' ? null : u.createdAt,
-    }
-  })
-}
-
-/** Aggregate-only marketing KPIs + a short demo campaign history. */
-export function buildMarketingMetrics(directory: DirectoryEntry[]): MarketingMetrics {
-  const optedIn = directory.filter((d) => d.consent === 'opted_in').length
-  const optedOut = directory.filter((d) => d.consent === 'opted_out').length
-  const unknown = directory.length - optedIn - optedOut
-  const mailable = directory.filter((d) => d.consent === 'opted_in' && d.status === 'active').length
-
-  const recentCampaigns: CampaignRecord[] = [
-    {
-      id: 'cmp_002',
-      subject: 'Platform update: faster exports',
-      type: 'update',
-      bodyType: 'html',
-      audienceCount: Math.min(mailable, 24),
-      providerMessages: Math.min(mailable, 24),
-      status: 'sent',
-      sentBy: 'admin@rayern.com.ng',
-      sentAt: minutesAgo(60 * 26),
-    },
-    {
-      id: 'cmp_001',
-      subject: 'Welcome to Rayern — getting started',
-      type: 'announcement',
-      bodyType: 'text',
-      audienceCount: 18,
-      providerMessages: 18,
-      status: 'sent',
-      sentBy: 'admin@rayern.com.ng',
-      sentAt: minutesAgo(60 * 24 * 6),
-    },
-  ]
-
-  return {
-    consent: { optedIn, optedOut, unknown },
-    mailable,
-    campaigns: {
-      total: recentCampaigns.length,
-      sent30d: recentCampaigns.length,
-      recipients30d: recentCampaigns.reduce((s, c) => s + c.audienceCount, 0),
-      lastSentAt: recentCampaigns[0]?.sentAt ?? null,
-    },
-    recentCampaigns,
-  }
-}
+export { daysAgo, isoNow, today }
