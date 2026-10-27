@@ -9,7 +9,7 @@ import { login, session } from '../lib/api'
  * Shown whenever there is no active admin session while the backend is
  * connected. Demo data mode does not require login.
  */
-export function LoginPage({ onSuccess }: { onSuccess: () => void }) {
+export function LoginPage({ onSuccess, expired = false }: { onSuccess: () => void; expired?: boolean }) {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -52,6 +52,12 @@ export function LoginPage({ onSuccess }: { onSuccess: () => void }) {
         <div className="rounded-lg border border-ink-200 bg-white p-6 shadow-sm">
           <h1 className="text-base font-semibold text-ink-900">Sign in</h1>
           <p className="mt-1 text-xs text-ink-500">Dashboard administrator access, provided by the dashboard API.</p>
+
+          {expired ? (
+            <p role="alert" className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              Your session ended (HTTP 401 — the server rejected the token). Sign in again to continue.
+            </p>
+          ) : null}
 
           <form onSubmit={handleSubmit} className="mt-5 space-y-4">
             <Field label="Email">

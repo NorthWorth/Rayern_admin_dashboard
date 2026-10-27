@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Card, CardBody, CardHeader } from '../components/ui/Card'
 import { KpiCard } from '../components/KpiCard'
 import { SearchInput } from '../components/SearchInput'
@@ -26,9 +26,16 @@ export function UsersPage() {
   const [page, setPage] = useState(1)
   const debouncedSearch = useDebouncedValue(search)
 
-  useEffect(() => {
+  // Reset to page 1 when the filters change — adjusted during render so the
+  // list query runs exactly once with (new filters, page 1). The previous
+  // effect-based reset ran *after* the list effect, firing a wasted request
+  // with (new filters, stale page) whose response was then discarded.
+  const filterKey = `${debouncedSearch}\u0000${verification}\u0000${status}`
+  const [prevFilterKey, setPrevFilterKey] = useState(filterKey)
+  if (prevFilterKey !== filterKey) {
+    setPrevFilterKey(filterKey)
     setPage(1)
-  }, [debouncedSearch, verification, status])
+  }
 
   const statsQ = useQuery(() => usersService.stats())
   const listQ = useQuery(

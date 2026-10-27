@@ -1,10 +1,37 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { HttpError } from '../lib/api'
+
+/** Structured failure details so callers can show status/server context. */
+export interface QueryError {
+  /** Human-readable message (server-provided when the body carried one). */
+  message: string
+  /** HTTP status code, when the failure came from an HTTP response. */
+  status?: number
+  /** Server error code from the response envelope, when present. */
+  code?: string
+  /** Seconds until a retry may be appropriate (from Retry-After, when present). */
+  retryAfterSec?: number
+}
 
 export interface QueryState<T> {
   data: T | null
   loading: boolean
   error: string | null
+  /** Same failure as `error`, with HTTP status / server code / retry info. */
+  errorInfo: QueryError | null
   refetch: () => void
+}
+
+function toQueryError(err: unknown): QueryError {
+  if (err instanceof HttpError) {
+    return {
+      message: err.message,
+      status: err.status,
+      code: err.code,
+      retryAfterSec: err.retryAfterSec,
+    }
+  }
+  return { message: err instanceof Error ? err.message : 'Something went wrong' }
 }
 
 /**
@@ -16,6 +43,7 @@ export function useQuery<T>(fetcher: (() => Promise<T>) | null, deps: readonly u
   const [data, setData] = useState<T | null>(null)
   const [loading, setLoading] = useState<boolean>(fetcher !== null)
   const [error, setError] = useState<string | null>(null)
+  const [errorInfo, setErrorInfo] = useState<QueryError | null>(null)
   const [tick, setTick] = useState(0)
   const mounted = useRef(true)
 
@@ -34,6 +62,7 @@ export function useQuery<T>(fetcher: (() => Promise<T>) | null, deps: readonly u
     let cancelled = false
     setLoading(true)
     setError(null)
+    setErrorInfo(null)
 
     fetcher()
       .then((result) => {
@@ -41,7 +70,9 @@ export function useQuery<T>(fetcher: (() => Promise<T>) | null, deps: readonly u
       })
       .catch((err: unknown) => {
         if (!cancelled && mounted.current) {
-          setError(err instanceof Error ? err.message : 'Something went wrong')
+          const info = toQueryError(err)
+          setError(info.message)
+          setErrorInfo(info)
         }
       })
       .finally(() => {
@@ -56,5 +87,5 @@ export function useQuery<T>(fetcher: (() => Promise<T>) | null, deps: readonly u
 
   const refetch = useCallback(() => setTick((t) => t + 1), [])
 
-  return { data, loading, error, refetch }
+  return { data, loading, error, errorInfo, refetch }
 }

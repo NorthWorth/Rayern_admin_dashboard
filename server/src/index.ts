@@ -95,6 +95,10 @@ app.use(
     // Only what the dashboard API actually uses (see client/src/lib/api.ts).
     methods: ['GET', 'POST', 'PATCH', 'DELETE'],
     allowedHeaders: ['Accept', 'Authorization', 'Content-Type'],
+    // Make the rate-limiter's Retry-After readable from the browser so the
+    // dashboard can show when a 429'd request may be retried (cross-origin
+    // headers are otherwise opaque to JavaScript).
+    exposedHeaders: ['Retry-After'],
     maxAge: 86_400,
   }),
 )

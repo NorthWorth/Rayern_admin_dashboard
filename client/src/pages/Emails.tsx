@@ -126,7 +126,11 @@ export function EmailsPage() {
         ) : emails.length === 0 ? (
           <EmptyState title="No emails yet" description="Emails sent through the dashboard backend will appear here." />
         ) : (
-          <div className="overflow-x-auto">
+          /* `relative` makes this scroller the containing block for the
+           * absolutely-positioned .sr-only cells below, so they are clipped
+           * with the table instead of escaping to the document and adding
+           * page-level (second vertical + horizontal) scrollbars. */
+          <div className="relative overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-ink-200 bg-ink-50/60 text-left text-[11px] font-semibold uppercase tracking-wide text-ink-500">

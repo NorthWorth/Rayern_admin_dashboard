@@ -100,7 +100,10 @@ const pageTitles: Record<string, { title: string; sub: string }> = {
 function DemoBanner() {
   if (!DEMO_MODE) return null
   return (
-    <div className="flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] text-amber-800">
+    /* Hidden below lg: its unbreakable code chip keeps the topbar's right
+     * cluster from shrinking, which clipped the Sign out button on narrow
+     * viewports (the badge is demo-only chrome; production never renders it). */
+    <div className="hidden items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] text-amber-800 lg:flex">
       <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden="true" />
       Demo data — set <code className="rounded bg-amber-100 px-1 font-mono text-[10px]">VITE_ADMIN_API_URL</code> to connect the backend
     </div>
@@ -204,23 +207,39 @@ function NotFound() {
 }
 
 function AuthedApp() {
-  const [authed, setAuthed] = useState(() => session.token() !== null)
+  // Demo mode has no backend to authenticate against, so it opens straight on
+  // the console (documented in LoginPage: "Demo data mode does not require
+  // login"). Connected mode always starts from a real admin session.
+  const [authed, setAuthed] = useState(() => DEMO_MODE || session.token() !== null)
+  const [sessionExpired, setSessionExpired] = useState(false)
 
   useEffect(() => {
-    const onAuthExpired = () => setAuthed(false)
+    const onAuthExpired = () => {
+      setAuthed(false)
+      setSessionExpired(true)
+    }
     window.addEventListener(AUTH_EVENT, onAuthExpired)
     return () => window.removeEventListener(AUTH_EVENT, onAuthExpired)
   }, [])
 
   if (!authed) {
-    return <LoginPage onSuccess={() => setAuthed(true)} />
+    return (
+      <LoginPage
+        expired={sessionExpired}
+        onSuccess={() => {
+          setSessionExpired(false)
+          setAuthed(true)
+        }}
+      />
+    )
   }
 
   return (
     <Shell
       onSignOut={() => {
         session.clear()
-        setAuthed(false)
+        // Demo mode has no session to end — stay on the console.
+        setAuthed(DEMO_MODE)
       }}
     />
   )
