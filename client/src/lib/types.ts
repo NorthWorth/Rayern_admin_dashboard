@@ -94,6 +94,10 @@ export interface PlatformMetricsOverview {
   totalWorkspaces: number
   registrationsTrend: Array<{ date: string; count: number }>
   planBreakdown: Array<{ plan: Workspace['plan']; count: number }>
+  /** Which source served these counts: synchronized Rayern aggregates or the local registry. */
+  dataSource: 'rayern-sync' | 'local-registry'
+  /** When the Rayern aggregates behind this response were last pulled (null for local registry). */
+  syncedAt: string | null
 }
 
 /* --------------------------------- Emails --------------------------------- */

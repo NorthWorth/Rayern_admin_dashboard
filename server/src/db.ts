@@ -90,7 +90,11 @@ export async function startEmbeddedDbIfConfigured(): Promise<void> {
     import('@electric-sql/pglite-socket'),
   ])
   const pg = await PGlite.create('memory://')
-  const server = new PGLiteSocketServer({ db: pg, host: '127.0.0.1', port: EMBEDDED_PG_PORT })
+  // maxConnections must exceed the API's own pool (1): tooling such as the
+  // smoke suite connects to the SAME embedded database directly for
+  // postcondition checks. Queries still serialize through one shared queue,
+  // so concurrency here cannot corrupt PGlite.
+  const server = new PGLiteSocketServer({ db: pg, host: '127.0.0.1', port: EMBEDDED_PG_PORT, maxConnections: 8 })
   await server.start()
   console.log(`[dashboard-api] embedded Postgres (PGlite) listening on 127.0.0.1:${EMBEDDED_PG_PORT} (dev mode)`)
 }

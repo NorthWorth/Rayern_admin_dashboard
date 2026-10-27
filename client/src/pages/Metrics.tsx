@@ -5,10 +5,12 @@ import { VolumeBarChart } from '../components/charts'
 import { TrendLineChart } from '../components/charts'
 import { platformMetricsService } from '../services/platformMetrics'
 import { useQuery } from '../hooks/useQuery'
+import { usePageRefresh } from '../hooks/usePageRefresh'
 import { formatNumber, titleCase } from '../lib/utils'
 
 export function MetricsPage() {
   const q = useQuery(() => platformMetricsService.overview())
+  usePageRefresh([q])
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6">

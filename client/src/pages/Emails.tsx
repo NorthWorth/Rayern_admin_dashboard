@@ -10,19 +10,28 @@ import { EmptyState, ErrorState, LoadingBlock } from '../components/ui/states'
 import { VolumeBarChart } from '../components/charts'
 import { useToast } from '../components/ui/Toast'
 import { useQuery } from '../hooks/useQuery'
+import { usePageRefresh } from '../hooks/usePageRefresh'
 import { emailsService } from '../services/emails'
 import { CampaignComposer } from '../components/CampaignComposer'
 import { DEFAULT_FROM } from '../lib/api'
 import { formatDateTime, formatNumber, titleCase } from '../lib/utils'
-import type { EmailType } from '../lib/types'
-
-import { emailStatusTone } from './Overview'
+import type { EmailStatus, EmailType } from '../lib/types'
 
 const TYPE_LABELS: Record<EmailType, string> = {
   update: 'Product update',
   announcement: 'Announcement',
   promotion: 'Promotional',
   notice: 'Important notice',
+}
+
+/** Status badge tone — kept next to the campaign list it renders. */
+function emailStatusTone(status: EmailStatus): 'green' | 'amber' | 'red' | 'neutral' {
+  switch (status) {
+    case 'delivered': return 'green'
+    case 'sent': return 'neutral'
+    case 'queued': return 'amber'
+    default: return 'red'
+  }
 }
 
 function typeTone(t: EmailType): 'blue' | 'green' | 'amber' | 'neutral' {
@@ -37,6 +46,9 @@ function typeTone(t: EmailType): 'blue' | 'green' | 'amber' | 'neutral' {
 export function EmailsPage() {
   const listQ = useQuery(() => emailsService.list())
   const statsQ = useQuery(() => emailsService.stats())
+  // Navbar refresh re-runs the campaign list and stats; the composer and any
+  // open preview keep their state.
+  usePageRefresh([listQ, statsQ])
   const [composerOpen, setComposerOpen] = useState(false)
   const [campaignOpen, setCampaignOpen] = useState(false)
   const [copySource, setCopySource] = useState<string | null>(null)

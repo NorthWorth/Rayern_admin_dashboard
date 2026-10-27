@@ -5,15 +5,22 @@
 @layer base {
   html {
     -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
   }
 
   body {
+    @apply bg-ivory-100 text-ink-900;
     font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
   }
 
   ::selection {
-    background: #cfe8dc;
-    color: #111418;
+    background: #e3d4b6;
+    color: #20201e;
+  }
+
+  /* Consistent, visible keyboard focus using the champagne accent. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-champagne-400/70 ring-offset-1 ring-offset-white;
   }
 }
 
@@ -21,14 +28,14 @@
   /* Thin, calm scrollbars for dense operator panels. */
   .scrollbar-thin {
     scrollbar-width: thin;
-    scrollbar-color: #c4c9d1 transparent;
+    scrollbar-color: #d3cbbb transparent;
   }
   .scrollbar-thin::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
   .scrollbar-thin::-webkit-scrollbar-thumb {
-    background: #c4c9d1;
+    background: #d3cbbb;
     border-radius: 8px;
   }
   .scrollbar-thin::-webkit-scrollbar-track {

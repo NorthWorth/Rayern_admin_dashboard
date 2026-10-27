@@ -5,25 +5,48 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Calm neutral "operator console" palette.
+        /**
+         * Ink & Champagne — the dashboard's only neutral scale.
+         * Deep Ink (#20201E) anchors text, headings and the featured KPI card;
+         * the scale warms upwards into the Warm Ivory background.
+         */
         ink: {
-          50: '#f7f8f9',
-          100: '#eef0f2',
-          200: '#dee1e6',
-          300: '#c4c9d1',
-          400: '#9aa2ae',
-          500: '#717a89',
-          600: '#545c6b',
-          700: '#40464f',
-          800: '#292e35',
-          900: '#1b1f25',
-          950: '#111418',
+          50: '#FAF8F4',
+          100: '#F1EDE5',
+          200: '#E6E0D6', // Warm Border
+          300: '#D3CBBB',
+          400: '#A9A294',
+          500: '#77756F', // Warm Grey (secondary text)
+          600: '#5F5D57',
+          700: '#4A4844',
+          800: '#33322F',
+          900: '#20201E', // Deep Ink
+          950: '#141413',
         },
-        accent: {
-          DEFAULT: '#1f6f54',
-          hover: '#185a44',
-          soft: '#e3f0ea',
-          softborder: '#bcd9cb',
+        /** Selective brand accent — small highlights only, never a surface flood. */
+        champagne: {
+          50: '#F9F5ED',
+          100: '#F1E8D6',
+          200: '#E3D4B6',
+          300: '#D2BC91',
+          400: '#C2A875',
+          500: '#B69A67', // Champagne
+          600: '#A08353',
+          700: '#83683F', // accessible on white for links
+          800: '#6A5333',
+          900: '#564329',
+        },
+        /** Soft supporting surfaces and restrained active states. */
+        sand: {
+          100: '#EFE8DA',
+          200: '#D9CBB4', // Sand
+          300: '#C7B596',
+        },
+        /** Main application background. */
+        ivory: {
+          50: '#FDFCF9',
+          100: '#F7F4EE', // Warm Ivory
+          200: '#F1ECE2',
         },
       },
       fontFamily: {
@@ -38,6 +61,12 @@ export default {
           'Arial',
           'sans-serif',
         ],
+        /** Editorial numerals for featured metrics. System-resident only. */
+        display: ['ui-serif', 'Georgia', 'Cambria', 'Times New Roman', 'serif'],
+      },
+      boxShadow: {
+        card: '0 1px 2px rgba(32, 32, 30, 0.04)',
+        popover: '0 12px 32px rgba(32, 32, 30, 0.12)',
       },
     },
   },

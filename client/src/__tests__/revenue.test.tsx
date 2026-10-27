@@ -11,6 +11,7 @@ vi.mock('../lib/api', async (importOriginal) => {
 import { adminMetrics } from '../lib/api'
 import { revenueService } from '../services/revenue'
 import { RevenuePage } from '../pages/Revenue'
+import { RefreshProvider } from '../hooks/usePageRefresh'
 import type { AdminMetricBilling, AdminMetricResponse } from '../lib/types'
 
 const BILLING: AdminMetricBilling = {
@@ -98,7 +99,11 @@ describe('RevenuePage rendering', () => {
   test('shows the loading state until data arrives', async () => {
     vi.mocked(adminMetrics).mockReturnValue(new Promise(() => {}))
 
-    render(<RevenuePage />)
+    render(
+      <RefreshProvider>
+        <RevenuePage />
+      </RefreshProvider>,
+    )
     expect(screen.queryByText('MRR')).not.toBeInTheDocument()
     expect(screen.queryByText(/unavailable/i)).not.toBeInTheDocument()
   })
@@ -106,7 +111,11 @@ describe('RevenuePage rendering', () => {
   test('renders MRR, ARR, subscribers, free users and plan breakdown from API data', async () => {
     vi.mocked(adminMetrics).mockResolvedValue(metricsPayload(BILLING))
 
-    render(<RevenuePage />)
+    render(
+      <RefreshProvider>
+        <RevenuePage />
+      </RefreshProvider>,
+    )
 
     await waitFor(() => expect(screen.getByText('USD12.34')).toBeInTheDocument())
     expect(screen.getByText('USD148.08')).toBeInTheDocument()
@@ -128,7 +137,11 @@ describe('RevenuePage rendering', () => {
   test('never recalculates MRR/ARR from minor units', async () => {
     vi.mocked(adminMetrics).mockResolvedValue(metricsPayload(BILLING))
 
-    render(<RevenuePage />)
+    render(
+      <RefreshProvider>
+        <RevenuePage />
+      </RefreshProvider>,
+    )
 
     await waitFor(() => expect(screen.getByText('USD12.34')).toBeInTheDocument())
     // 999 minor units would display as USD9.99 if the client recalculated.
@@ -141,7 +154,11 @@ describe('RevenuePage rendering', () => {
   test('shows the unavailable state when the sync has no billing block', async () => {
     vi.mocked(adminMetrics).mockResolvedValue(metricsPayload(null))
 
-    render(<RevenuePage />)
+    render(
+      <RefreshProvider>
+        <RevenuePage />
+      </RefreshProvider>,
+    )
 
     await waitFor(() => expect(screen.getByText('Revenue metrics unavailable')).toBeInTheDocument())
     expect(screen.getByText(/No billing data has been synchronized from Rayern yet/)).toBeInTheDocument()
@@ -154,7 +171,11 @@ describe('RevenuePage rendering', () => {
       error: { code: 'UNAUTHENTICATED', message: 'Authentication required' },
     } as AdminMetricResponse)
 
-    render(<RevenuePage />)
+    render(
+      <RefreshProvider>
+        <RevenuePage />
+      </RefreshProvider>,
+    )
 
     await waitFor(() => expect(screen.getByText('Authentication required')).toBeInTheDocument())
     expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument()

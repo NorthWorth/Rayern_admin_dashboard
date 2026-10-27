@@ -5,6 +5,7 @@ import { EmptyState, ErrorState, LoadingBlock } from '../components/ui/states'
 import { TrendLineChart } from '../components/charts'
 import { observabilityService } from '../services/observability'
 import { useQuery } from '../hooks/useQuery'
+import { usePageRefresh } from '../hooks/usePageRefresh'
 import { formatDuration, formatNumber, formatPct, timeAgo, titleCase } from '../lib/utils'
 import type { HealthStatus, TraceSpan } from '../lib/types'
 
@@ -14,6 +15,7 @@ function tone(s: HealthStatus): 'green' | 'amber' | 'red' {
 
 export function ObservabilityPage() {
   const q = useQuery(() => observabilityService.overview())
+  usePageRefresh([q])
   const [traceFilter, setTraceFilter] = useState<string | null>(null)
 
   const traces = q.data?.recentTraces ?? []

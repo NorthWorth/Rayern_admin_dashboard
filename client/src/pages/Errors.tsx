@@ -8,6 +8,7 @@ import { EmptyState, ErrorState, LoadingBlock } from '../components/ui/states'
 import { errorsService } from '../services/errors'
 import { useDebouncedValue } from '../hooks/useDebouncedValue'
 import { useQuery } from '../hooks/useQuery'
+import { usePageRefresh } from '../hooks/usePageRefresh'
 import { formatDateTime, timeAgo } from '../lib/utils'
 import type { ErrorEntry, ErrorSeverity } from '../lib/types'
 
@@ -32,6 +33,7 @@ export function ErrorsPage() {
     () => errorsService.list({ search: debouncedSearch, severity }),
     [debouncedSearch, severity],
   )
+  usePageRefresh([listQ])
 
   const errors = listQ.data ?? []
 
