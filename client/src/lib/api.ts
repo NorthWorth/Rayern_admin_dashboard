@@ -26,14 +26,54 @@ export interface ApiError {
   message: string
 }
 
+/**
+ * Error carrying everything the server told us about a failed request so the
+ * UI can show *why* it failed instead of a generic message:
+ *  - `status`        — HTTP status code (401, 429, 500, …)
+ *  - `code`          — server error code from the response envelope, when present
+ *                      (e.g. `UNAUTHENTICATED`, `ADMIN_ACCESS_REQUIRED`)
+ *  - `retryAfterSec` — seconds until a retry may be appropriate, parsed from
+ *                      `Retry-After` / `X-RateLimit-Reset` on 429/503 responses
+ */
 export class HttpError extends Error {
   status?: number
+  code?: string
+  retryAfterSec?: number
 
-  constructor(message: string, status?: number) {
+  constructor(message: string, status?: number, details: { code?: string; retryAfterSec?: number } = {}) {
     super(message)
     this.name = 'HttpError'
     this.status = status
+    this.code = details.code
+    this.retryAfterSec = details.retryAfterSec
   }
+}
+
+/**
+ * Parses rate-limit retry information from a response:
+ *  - `Retry-After`        — delta-seconds or an HTTP date (RFC 9110)
+ *  - `X-RateLimit-Reset`  — epoch seconds (or ms) at which the window resets
+ * Returns whole seconds until the retry, or null when absent/invalid — a
+ * missing header is never turned into an invented wait time.
+ */
+export function parseRetryAfter(res: Response, now = Date.now()): number | null {
+  const retryAfter = res.headers.get('retry-after')
+  if (retryAfter) {
+    const secs = Number(retryAfter)
+    if (Number.isFinite(secs) && secs >= 0) return Math.ceil(secs)
+    const dateMs = Date.parse(retryAfter)
+    if (!Number.isNaN(dateMs)) return Math.max(0, Math.ceil((dateMs - now) / 1000))
+  }
+  const reset = res.headers.get('x-ratelimit-reset')
+  if (reset) {
+    const value = Number(reset)
+    if (Number.isFinite(value) && value > 0) {
+      // Accept both seconds and milliseconds since epoch.
+      const resetMs = value < 1e12 ? value * 1000 : value
+      return Math.max(0, Math.ceil((resetMs - now) / 1000))
+    }
+  }
+  return null
 }
 
 /* ------------------------------ Admin session ------------------------------ */
@@ -79,6 +119,15 @@ export interface RequestOptions {
 }
 
 /**
+ * In-flight GETs, keyed by URL + session token. Concurrent identical reads
+ * (a StrictMode double-mounted effect, two cards asking for the same
+ * endpoint, an Update click landing while a first request is still out)
+ * share one network request instead of issuing duplicates. Only settled
+ * requests are shared — nothing is cached, so an Update always fetches anew.
+ */
+const inflightGet = new Map<string, Promise<unknown>>()
+
+/**
  * Single place where the app talks to the dashboard backend.
  * Extend here (auth headers, retries, tracing headers) as the backend matures.
  */
@@ -87,9 +136,38 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
     throw new HttpError('Dashboard API is not configured (VITE_ADMIN_API_URL is not set).', undefined)
   }
 
+  const method = options.method ?? 'GET'
+  const url = `${API_BASE_URL.replace(/\/$/, '')}${path}`
   const token = session.token()
-  const res = await fetch(`${API_BASE_URL.replace(/\/$/, '')}${path}`, {
-    method: options.method ?? 'GET',
+
+  // Share only fire-and-forget GETs: an aborted request would cancel its
+  // other readers, and non-GETs must never be collapsed together.
+  const shareKey = method === 'GET' && options.signal === undefined ? `${url}\u0000${token ?? ''}` : null
+  if (shareKey !== null) {
+    const pending = inflightGet.get(shareKey)
+    if (pending) return pending as Promise<T>
+  }
+
+  const request = executeRequest<T>(url, method, options, token)
+  if (shareKey !== null) {
+    inflightGet.set(shareKey, request)
+    void request
+      .catch(() => undefined)
+      .then(() => {
+        if (inflightGet.get(shareKey) === request) inflightGet.delete(shareKey)
+      })
+  }
+  return request
+}
+
+async function executeRequest<T>(
+  url: string,
+  method: NonNullable<RequestOptions['method']>,
+  options: RequestOptions,
+  token: string | null,
+): Promise<T> {
+  const res = await fetch(url, {
+    method,
     headers: {
       Accept: 'application/json',
       ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
@@ -102,9 +180,11 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
 
   if (!res.ok) {
     let message = `Request failed with status ${res.status}`
+    let code: string | undefined
     try {
       const payload = (await res.json()) as {
         message?: string
+        code?: string
         error?: string | { code?: string; message?: string }
       }
       if (typeof payload.message === 'string' && payload.message) {
@@ -115,14 +195,23 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
         // Rayern/dashboard error envelope: { success: false, error: { code, message } }
         message = payload.error.message
       }
+      if (typeof payload.code === 'string' && payload.code) {
+        code = payload.code
+      } else if (payload.error && typeof payload.error === 'object' && typeof payload.error.code === 'string') {
+        code = payload.error.code
+      }
     } catch {
       // keep default message
     }
+    const retryAfterSec = parseRetryAfter(res)
     if (res.status === 401) {
       // Token expired or revoked — notify the shell so it shows the login view.
       window.dispatchEvent(new Event(AUTH_EVENT))
     }
-    throw new HttpError(message, res.status)
+    throw new HttpError(message, res.status, {
+      code,
+      retryAfterSec: retryAfterSec ?? undefined,
+    })
   }
 
   if (res.status === 204) return undefined as T

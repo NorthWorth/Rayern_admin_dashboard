@@ -111,6 +111,11 @@ export function rateLimit(opts: { windowMs: number; max: number; key?: string })
 
     bucket.count += 1
     if (bucket.count > opts.max) {
+      // Informational only: seconds until THIS fixed window resets. The window,
+      // the max and the bucket key are untouched — a client only learns when
+      // another attempt may be appropriate (RFC 9110 Retry-After).
+      const retryAfterSec = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))
+      res.set('Retry-After', String(retryAfterSec))
       res.status(429).json({ error: 'Too many requests. Slow down.' })
       return
     }

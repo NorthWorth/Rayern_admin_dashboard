@@ -113,7 +113,15 @@ export const config = {
     adminEmail: trimmed('RAYERN_ADMIN_EMAIL'),
     adminPassword: process.env.RAYERN_ADMIN_PASSWORD ?? '',
     timeoutMs: Math.max(5000, Number(process.env.RAYERN_SYNC_TIMEOUT_MS ?? '15000')),
-    intervalMs: Math.max(10_000, Number(process.env.RAYERN_SYNC_INTERVAL_MS ?? '300000')),
+    /**
+     * How often the dashboard pulls from Rayern (ms). Default 30 minutes
+     * (1800000 — long enough to stay clear of Rayern's rate limits).
+     * Overridable via RAYERN_SYNC_INTERVAL_MS, clamped to a 30s floor so a
+     * misconfiguration can never turn the worker into an aggressive retry
+     * loop. Invalid values fall back to the default instead of becoming NaN
+     * (NaN in setInterval would hammer Rayern ~every millisecond).
+     */
+    intervalMs: envFiniteNumber('RAYERN_SYNC_INTERVAL_MS', 1_800_000, 30_000, 86_400_000),
   },
   billing: {
     currency: (process.env.PAYSTACK_CURRENCY ?? 'USD').toUpperCase(),

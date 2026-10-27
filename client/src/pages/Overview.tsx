@@ -1,10 +1,12 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Card, CardBody, CardHeader } from '../components/ui/Card'
+import { Button } from '../components/ui/Button'
 import { KpiCard } from '../components/KpiCard'
 import { LoadingBlock, ErrorState } from '../components/ui/states'
 import { StatusBadge } from '../components/ui/Badge'
 import { TrendLineChart } from '../components/charts'
-import { useQuery } from '../hooks/useQuery'
+import { useQuery, type QueryState } from '../hooks/useQuery'
 import { platformMetricsService } from '../services/platformMetrics'
 import { emailsService } from '../services/emails'
 import { systemService } from '../services/system'
@@ -29,8 +31,129 @@ export function OverviewPage() {
   const recentEmails = emails.slice(0, 6)
   const registrations = (metricsQ.data?.registrationsTrend ?? []).slice(-30)
 
+  /* -------------------------- Manual data refresh ------------------------- */
+  // One entry per request this page makes. The Update button re-runs exactly
+  // these fetchers through the normal API path — no dedicated endpoint, no
+  // cache-busting, so every backend rate-limit rule applies unchanged.
+  const sources: Array<[label: string, q: QueryState<unknown>]> = [
+    ['Accounts', usersQ],
+    ['Workspaces', wsQ],
+    ['Platform metrics', metricsQ],
+    ['Emails', emailsQ],
+    ['Email stats', emailStatsQ],
+    ['System health', systemQ],
+  ]
+  const busy = sources.some(([, q]) => q.loading)
+  const failed = sources.filter(([, q]) => q.error !== null)
+  const allLoaded = sources.every(([, q]) => q.data !== null)
+
+  const [lastSuccessAt, setLastSuccessAt] = useState<number | null>(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const inFlight = useRef(false)
+
+  // Last successful update = every source settled without an error.
+  useEffect(() => {
+    if (!busy && allLoaded && failed.length === 0) setLastSuccessAt(Date.now())
+  }, [busy, allLoaded, failed.length])
+
+  // A manual refresh ends once its requests have started and settled — this
+  // also keeps the button disabled for the whole flight, so a second click
+  // (or a double-mounted effect) can never start duplicate requests.
+  useEffect(() => {
+    if (!refreshing) return
+    if (busy) {
+      inFlight.current = true
+      return
+    }
+    if (!inFlight.current) return // requests have not started yet
+    inFlight.current = false
+    setRefreshing(false)
+    if (failed.length === 0) setLastSuccessAt(Date.now())
+  }, [refreshing, busy, failed.length])
+
+  function handleUpdate(): void {
+    if (busy || refreshing) return
+    inFlight.current = false
+    setRefreshing(true)
+    for (const [, q] of sources) q.refetch()
+  }
+
+  const retryHint = useMemo(() => {
+    const secs = failed
+      .map(([, q]) => q.errorInfo?.retryAfterSec)
+      .filter((n): n is number => typeof n === 'number')
+    if (secs.length === 0) return null
+    const wait = Math.max(...secs)
+    return {
+      sec: wait,
+      at: new Date(Date.now() + wait * 1000).toLocaleTimeString('en-US', {
+        hour: 'numeric',
+        minute: '2-digit',
+        second: '2-digit',
+      }),
+    }
+    // Recomputed only when the retry information itself changes, so the shown
+    // clock time does not drift on unrelated re-renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [failed.map(([, q]) => q.errorInfo?.retryAfterSec ?? -1).join(',')])
+
+  const statusText = busy || refreshing
+    ? 'Loading the latest data…'
+    : lastSuccessAt
+      ? `Last updated ${new Date(lastSuccessAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`
+      : 'No successful update yet'
+
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6">
+      {/* Data status bar — loading state, last successful update, error detail */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-ink-200 bg-white px-4 py-3">
+        <div className="min-w-0 space-y-1.5">
+          <p className="text-sm font-semibold text-ink-900">Dashboard data</p>
+          <p className="text-xs text-ink-500" data-testid="refresh-status">
+            {statusText}
+          </p>
+          {failed.length > 0 ? (
+            <div role="alert" className="max-w-3xl rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+              <p className="font-semibold">
+                {failed.length} of {sources.length} data sources failed to update
+              </p>
+              <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                {failed.map(([label, q]) => (
+                  <li key={label}>
+                    {label}: {q.errorInfo?.status ? `HTTP ${q.errorInfo.status}` : 'Request failed'}
+                    {q.errorInfo?.code ? ` (${q.errorInfo.code})` : ''} — {q.error}
+                  </li>
+                ))}
+              </ul>
+              {retryHint ? (
+                <p className="mt-1 font-medium">
+                  Rate limited — another attempt may be appropriate in about {retryHint.sec}s (at {retryHint.at}).
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={handleUpdate}
+          disabled={busy || refreshing}
+          aria-busy={busy || refreshing}
+        >
+          {busy || refreshing ? (
+            <>
+              <svg className="animate-spin" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <circle cx="8" cy="8" r="6" stroke="currentColor" strokeOpacity="0.3" strokeWidth="2" />
+                <path d="M14 8a6 6 0 0 0-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+              Updating…
+            </>
+          ) : (
+            'Update data'
+          )}
+        </Button>
+      </div>
+
       {/* KPI grid — aggregate platform state only */}
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <KpiCard label="Registered accounts" value={usersQ.data ? formatNumber(usersQ.data.totalUsers) : '—'} sub={usersQ.data ? `${formatNumber(usersQ.data.newUsers7d)} new in 7d` : undefined} />
