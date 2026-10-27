@@ -56,8 +56,11 @@ export const SyncPayload = z.object({
       newAccounts30d: untrackedInt,
       verifiedAccounts: untrackedInt,
       unverifiedAccounts: untrackedInt,
-      deletedAccounts30d: z.number().int().min(0).nullable(),
-      deletionRequestsPending: z.number().int().min(0).nullable(),
+      // Nullable-in-transit, but ALWAYS normalized to a number: the aggregate
+      // contract (and every consumer of it, e.g. platform-metrics) treats these
+      // as counts, so null must never reach storage or the API response.
+      deletedAccounts30d: untrackedInt,
+      deletionRequestsPending: untrackedInt,
       registrationsTrend: untrackedList(
         z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), count: untrackedInt }),
         400,
@@ -65,7 +68,8 @@ export const SyncPayload = z.object({
       planBreakdown: untrackedList(AccountPlanBreakdownEntry, 20),
     })
     .nullable()
-    .optional(),
+    .optional()
+    .transform((v) => v ?? undefined),
   workspaces: z
     .object({
       totalWorkspaces: z.number().int().min(0),
@@ -74,7 +78,8 @@ export const SyncPayload = z.object({
       planBreakdown: untrackedList(AccountPlanBreakdownEntry, 20),
     })
     .nullable()
-    .optional(),
+    .optional()
+    .transform((v) => v ?? undefined),
   billing: z
     .object({
       currency: z.literal('USD'),
@@ -97,7 +102,8 @@ export const SyncPayload = z.object({
       definitions: z.record(z.string(), z.unknown()),
     })
     .nullable()
-    .optional(),
+    .optional()
+    .transform((v) => v ?? undefined),
   services: z
     .array(
       z.object({
@@ -112,8 +118,13 @@ export const SyncPayload = z.object({
     )
     .max(20)
     .nullable()
-    .optional(),
-  telemetry: z.record(z.string(), z.unknown()).nullable().optional(),
+    .optional()
+    .transform((v) => v ?? undefined),
+  telemetry: z
+    .record(z.string(), z.unknown())
+    .nullable()
+    .optional()
+    .transform((v) => v ?? undefined),
 })
 
 export type SyncPayloadData = z.infer<typeof SyncPayload>
@@ -173,22 +184,22 @@ export async function storePayload(data: SyncPayloadData): Promise<string[]> {
     )
   }
 
-  if (data.accounts !== undefined && data.accounts !== null) {
+  if (data.accounts !== undefined) {
     await upsertState('accounts', data.accounts)
     sections.push('accounts')
   }
 
-  if (data.workspaces !== undefined && data.workspaces !== null) {
+  if (data.workspaces !== undefined) {
     await upsertState('workspaces', data.workspaces)
     sections.push('workspaces')
   }
 
-  if (data.billing !== undefined && data.billing !== null) {
+  if (data.billing !== undefined) {
     await upsertState('billing', data.billing)
     sections.push('billing')
   }
 
-  if (data.services !== undefined && data.services !== null && data.services.length > 0) {
+  if (data.services !== undefined && data.services.length > 0) {
     for (const s of data.services) {
       await query(
         `INSERT INTO service_health (service, kind, status, uptime_pct_30d, latency_p50, latency_p95, last_incident_at)
@@ -214,7 +225,7 @@ export async function storePayload(data: SyncPayloadData): Promise<string[]> {
     sections.push('services')
   }
 
-  if (data.telemetry !== undefined && data.telemetry !== null) {
+  if (data.telemetry !== undefined) {
     await upsertState('telemetry', data.telemetry)
     sections.push('telemetry')
   }

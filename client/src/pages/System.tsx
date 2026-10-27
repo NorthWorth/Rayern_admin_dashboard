@@ -5,6 +5,7 @@ import { LoadingBlock, ErrorState } from '../components/ui/states'
 import { VolumeBarChart } from '../components/charts'
 import { systemService } from '../services/system'
 import { useQuery } from '../hooks/useQuery'
+import { usePageRefresh } from '../hooks/usePageRefresh'
 import { formatCompact, formatNumber, formatPct, timeAgo, titleCase } from '../lib/utils'
 import type { HealthStatus, RayernSyncStatus } from '../lib/types'
 
@@ -14,6 +15,7 @@ function tone(s: HealthStatus): 'green' | 'amber' | 'red' {
 
 export function SystemPage() {
   const q = useQuery(() => systemService.overview())
+  usePageRefresh([q])
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6">

@@ -10,6 +10,14 @@ export default defineConfig({
     port: Number(process.env.PORT) || 5173,
     strictPort: false,
     hmr: false,
+    // Vite 5.4 validates the Host header. The preview hostname is injected
+    // per process (VITE_ALLOWED_HOSTS, comma-separated, exact names only —
+    // never `true` or a wildcard), so no environment-specific host lives in
+    // this file.
+    allowedHosts: (process.env.VITE_ALLOWED_HOSTS ?? '')
+      .split(',')
+      .map((h) => h.trim())
+      .filter(Boolean),
   },
   preview: {
     host: '0.0.0.0',

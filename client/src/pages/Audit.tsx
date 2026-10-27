@@ -7,6 +7,7 @@ import { EmptyState, ErrorState, LoadingBlock } from '../components/ui/states'
 import { auditService } from '../services/audit'
 import { useDebouncedValue } from '../hooks/useDebouncedValue'
 import { useQuery } from '../hooks/useQuery'
+import { usePageRefresh } from '../hooks/usePageRefresh'
 import { formatDateTime } from '../lib/utils'
 import type { AuditActorKind, AuditEvent } from '../lib/types'
 
@@ -19,6 +20,7 @@ export function AuditPage() {
     () => auditService.list({ search: debouncedSearch, actorKind }),
     [debouncedSearch, actorKind],
   )
+  usePageRefresh([listQ])
 
   const events = listQ.data ?? []
 

@@ -4,6 +4,7 @@ import { KpiCard } from '../components/KpiCard'
 import { Badge } from '../components/ui/Badge'
 import { EmptyState, ErrorState, LoadingBlock } from '../components/ui/states'
 import { useQuery } from '../hooks/useQuery'
+import { usePageRefresh } from '../hooks/usePageRefresh'
 import { revenueService, type RevenueState } from '../services/revenue'
 import { systemService } from '../services/system'
 import type { SystemOverview } from '../lib/types'
@@ -26,6 +27,8 @@ export function RevenuePage() {
       .then(() => systemService.overview())
       .catch(() => null),
   )
+  // Navbar refresh re-runs exactly these two queries.
+  usePageRefresh([query, syncQ])
 
   const state: RevenueState = query.data ?? { kind: 'loading' }
 

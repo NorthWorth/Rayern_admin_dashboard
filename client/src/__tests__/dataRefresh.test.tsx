@@ -19,6 +19,8 @@ vi.hoisted(() => {
 })
 
 import { OverviewPage } from '../pages/Overview'
+import { RefreshControl } from '../components/RefreshControl'
+import { RefreshProvider } from '../hooks/usePageRefresh'
 
 type Mode = 'ok' | 'rate-limited' | 'unauthorized'
 
@@ -69,23 +71,62 @@ const PAYLOADS: Record<string, unknown> = {
     recentFailures: [],
     sync: { enabled: false, status: 'healthy', lastSuccessAt: null, lastAttemptAt: null, consecutiveFailures: 0, stale: false, lastError: null },
   },
+  '/api/v1/admin/metrics': {
+    success: true,
+    data: {
+      accounts: {
+        totalAccounts: 10,
+        newAccounts30d: 2,
+        verifiedAccounts: 8,
+        unverifiedAccounts: 2,
+        deletedAccounts30d: 0,
+        deletionRequestsPending: 0,
+        registrationsTrend: [],
+        planBreakdown: [],
+      },
+      workspaces: { totalWorkspaces: 5, newWorkspaces30d: 1, avgMembersPerWorkspace: 2, planBreakdown: [] },
+      billing: null,
+      services: [],
+      telemetry: {},
+    },
+  },
+  '/audit': [],
+  '/errors': [],
+  '/marketing/metrics': {
+    consent: { optedIn: 3, optedOut: 1, unknown: 6 },
+    mailable: 3,
+    campaigns: { total: 2, sent30d: 1, recipients30d: 12, lastSentAt: null },
+    recentCampaigns: [],
+  },
+  '/users': { items: [], total: 0, page: 1, pageSize: 5 },
 }
 
+/** Exactly the endpoints the current Overview registers with the navbar refresh. */
 const SOURCE_PATHS = [
-  '/emails',
-  '/emails/stats',
+  '/api/v1/admin/metrics',
+  '/audit',
+  '/errors',
+  '/marketing/metrics',
   '/platform-metrics/overview',
   '/system/overview',
+  '/users',
   '/users/stats',
   '/workspaces/stats',
 ]
 
-/** Overview links to other routes, so it needs a router context. */
+/**
+ * Overview links to other routes (router context) and registers its queries
+ * with the shared refresh mechanism — rendered exactly as the shell does:
+ * provider + navbar control + page.
+ */
 function renderOverview(): void {
   render(
-    <MemoryRouter>
-      <OverviewPage />
-    </MemoryRouter>,
+    <RefreshProvider>
+      <MemoryRouter>
+        <RefreshControl />
+        <OverviewPage />
+      </MemoryRouter>
+    </RefreshProvider>,
   )
 }
 
@@ -122,12 +163,12 @@ afterAll(() => {
 describe('manual refresh — Overview data view', () => {
   test('Update data sends exactly one request per data source, nothing else', async () => {
     renderOverview()
-    await waitFor(() => expect(screen.getByTestId('refresh-status')).toHaveTextContent('Last updated'))
+    await waitFor(() => expect(screen.getByTestId('last-refresh')).toHaveTextContent('Updated'))
 
     counts.clear()
-    fireEvent.click(screen.getByRole('button', { name: /update data/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^update$/i }))
 
-    await waitFor(() => expect(screen.getByTestId('refresh-status')).toHaveTextContent('Last updated'))
+    await waitFor(() => expect(screen.getByTestId('last-refresh')).toHaveTextContent('Updated'))
 
     expect([...counts.keys()].sort()).toEqual(SOURCE_PATHS)
     for (const [, n] of counts) expect(n).toBe(1)
@@ -135,34 +176,34 @@ describe('manual refresh — Overview data view', () => {
 
   test('shows a loading state and blocks duplicate requests while a refresh runs', async () => {
     renderOverview()
-    await waitFor(() => expect(screen.getByTestId('refresh-status')).toHaveTextContent('Last updated'))
+    await waitFor(() => expect(screen.getByTestId('last-refresh')).toHaveTextContent('Updated'))
 
     counts.clear()
-    fireEvent.click(screen.getByRole('button', { name: /update data/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^update$/i }))
 
     const updating = screen.getByRole('button', { name: /updating/i })
     expect(updating).toBeDisabled()
-    expect(screen.getByTestId('refresh-status')).toHaveTextContent('Loading the latest data…')
+    expect(screen.getByTestId('last-refresh')).toHaveTextContent('Loading the latest data…')
 
     // A second click during the flight must not start another round.
     fireEvent.click(updating)
 
-    await waitFor(() => expect(screen.getByTestId('refresh-status')).toHaveTextContent('Last updated'))
-    expect(screen.getByRole('button', { name: /update data/i })).toBeEnabled()
+    await waitFor(() => expect(screen.getByTestId('last-refresh')).toHaveTextContent('Updated'))
+    expect(screen.getByRole('button', { name: /^update$/i })).toBeEnabled()
     expect([...counts.keys()].sort()).toEqual(SOURCE_PATHS)
     for (const [, n] of counts) expect(n).toBe(1)
   })
 
   test('keeps the last successful update time visible after a successful refresh', async () => {
     renderOverview()
-    await waitFor(() => expect(screen.getByTestId('refresh-status')).toHaveTextContent('Last updated'))
-    const first = screen.getByTestId('refresh-status').textContent
+    await waitFor(() => expect(screen.getByTestId('last-refresh')).toHaveTextContent('Updated'))
+    const first = screen.getByTestId('last-refresh').textContent
 
-    fireEvent.click(screen.getByRole('button', { name: /update data/i }))
-    await waitFor(() => expect(screen.getByTestId('refresh-status')).toHaveTextContent('Last updated'))
+    fireEvent.click(screen.getByRole('button', { name: /^update$/i }))
+    await waitFor(() => expect(screen.getByTestId('last-refresh')).toHaveTextContent('Updated'))
 
-    expect(screen.getByTestId('refresh-status').textContent).toMatch(/^Last updated /)
-    expect(first).toMatch(/^Last updated /)
+    expect(screen.getByTestId('last-refresh').textContent).toMatch(/^Updated /)
+    expect(first).toMatch(/^Updated /)
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
@@ -170,11 +211,16 @@ describe('manual refresh — Overview data view', () => {
     mode = 'unauthorized'
     renderOverview()
 
-    const alert = await screen.findByRole('alert')
-    expect(alert).toHaveTextContent('6 of 6 data sources failed to update')
+    // The navbar failure panel — Overview also renders its own inline banner,
+    // which is a different (also role=alert) element.
+    const alert = await screen.findByTestId('refresh-failures')
+    // 8 of the 9 sources report failures through the query layer; revenue
+    // reports its own failure as page state (RevenuePage's error panel), which
+    // the navbar control correctly does not double-count.
+    expect(alert).toHaveTextContent('8 of 9 data sources failed to update')
     expect(alert).toHaveTextContent('HTTP 401 (UNAUTHENTICATED) — Authentication required')
     // No fabricated success time for a failed load.
-    expect(screen.getByTestId('refresh-status')).toHaveTextContent('No successful update yet')
+    expect(screen.getByTestId('last-refresh')).toHaveTextContent('No successful update yet')
   })
 
   test('dispatches the auth-expired event on 401 so the shell can show login', async () => {
@@ -190,10 +236,10 @@ describe('manual refresh — Overview data view', () => {
     mode = 'rate-limited'
     renderOverview()
 
-    const alert = await screen.findByRole('alert')
+    const alert = await screen.findByTestId('refresh-failures')
     expect(alert).toHaveTextContent('HTTP 429')
     expect(alert).toHaveTextContent('Too many requests. Slow down.')
-    expect(alert).toHaveTextContent(/another attempt may be appropriate in about 45s \(at [^)]+\)/)
+    expect(alert).toHaveTextContent(/Another attempt may be appropriate in about 45s \(at [^)]+\)/)
   })
 })
 

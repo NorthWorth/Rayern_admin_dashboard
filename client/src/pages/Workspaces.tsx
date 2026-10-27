@@ -9,6 +9,7 @@ import { EmptyState, ErrorState, LoadingBlock } from '../components/ui/states'
 import { workspacesService } from '../services/workspaces'
 import { useDebouncedValue } from '../hooks/useDebouncedValue'
 import { useQuery } from '../hooks/useQuery'
+import { usePageRefresh } from '../hooks/usePageRefresh'
 import { formatDate, formatNumber, titleCase } from '../lib/utils'
 import type { Paged, Workspace, WorkspaceFilters } from '../lib/types'
 
@@ -41,6 +42,8 @@ export function WorkspacesPage() {
     () => workspacesService.list({ search: debouncedSearch, plan, page, pageSize: PAGE_SIZE }),
     [debouncedSearch, plan, page],
   )
+  // Navbar refresh re-runs exactly these queries, keeping search, plan and page.
+  usePageRefresh([statsQ, listQ])
 
   const data: Paged<Workspace> | null = listQ.data
 

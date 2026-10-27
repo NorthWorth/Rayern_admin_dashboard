@@ -175,6 +175,11 @@ export function buildPlatformMetrics(users: User[], workspaces: Workspace[]): Pl
       { plan: 'pro', count: wsStats.proWorkspaces },
       { plan: 'team', count: wsStats.teamWorkspaces },
     ],
+    // Demo dataset: no Rayern pull-sync behind it, so it reports the local
+    // source with no sync timestamp — exactly what a real unsynced backend
+    // would say.
+    dataSource: 'local-registry' as const,
+    syncedAt: null,
   }
 }
 

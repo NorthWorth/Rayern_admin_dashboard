@@ -9,6 +9,7 @@ import { Select } from '../components/ui/Input'
 import { usersService } from '../services/users'
 import { useDebouncedValue } from '../hooks/useDebouncedValue'
 import { useQuery } from '../hooks/useQuery'
+import { usePageRefresh } from '../hooks/usePageRefresh'
 import { formatDate, formatNumber, initialsOf } from '../lib/utils'
 import type { AccountStatus, Paged, User, VerificationStatus } from '../lib/types'
 
@@ -42,6 +43,8 @@ export function UsersPage() {
     () => usersService.list({ search: debouncedSearch, verification, status, page, pageSize: PAGE_SIZE }),
     [debouncedSearch, verification, status, page],
   )
+  // Navbar refresh re-runs exactly these queries, keeping search, filters and page.
+  usePageRefresh([statsQ, listQ])
 
   const data: Paged<User> | null = listQ.data
 

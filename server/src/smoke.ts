@@ -41,8 +41,14 @@ const BASE = `http://127.0.0.1:${PORT}`
 const RAYERN_MOCK_PORT = 4599
 const RAYERN_MOCK_URL = `http://127.0.0.1:${RAYERN_MOCK_PORT}/internal/dashboard-metrics`
 
-const SYNC_INTERVAL_MS = 4000
-const SYNC_TIMEOUT_MS = 3000
+/* The config clamps RAYERN_SYNC_INTERVAL_MS to a 30s safety floor, so a 4s
+ * value would be a lie the scheduler never honours: awaitTick budgets must be
+ * derived from the schedule the API actually runs. 30s it is. */
+const SYNC_INTERVAL_MS = 30_000
+/* The config clamps RAYERN_SYNC_TIMEOUT_MS up to a 5s floor, so a 3s value
+ * would make the slow-Rayern test race the effective timeout. 8s is honoured
+ * as-is, and the mock's delay (timeout + 2s) then strictly exceeds it. */
+const SYNC_TIMEOUT_MS = 8000
 
 const CHILD_ENV: NodeJS.ProcessEnv = {
   ...process.env,
@@ -71,6 +77,12 @@ const CHILD_ENV: NodeJS.ProcessEnv = {
   // No RESEND_API_KEY → email send uses the no-op dry-run transport.
   // No DATABASE_URL → embedded Postgres (PGlite) is used.
 }
+
+// The smoke process queries the child's embedded Postgres directly later on
+// (per-recipient leak checks). db.ts reads EMBEDDED_PG_PORT at module load, so
+// point this process at the SAME port the child listens on — the default
+// (54329) belongs to whatever else is running, not to this run.
+process.env.EMBEDDED_PG_PORT = CHILD_ENV.EMBEDDED_PG_PORT
 
 /* ------------------------------- Test harness ------------------------------ */
 
@@ -298,7 +310,7 @@ async function main(): Promise<void> {
    * attempt timestamp has advanced (i.e. the nth request has been processed).
    */
   const awaitTick = async (n: number, token: string): Promise<void> => {
-    const deadline = Date.now() + SYNC_INTERVAL_MS * 4
+    const deadline = Date.now() + SYNC_INTERVAL_MS * 2
     while (Date.now() < deadline && rayern.requestCount() < n) await sleep(150)
     const baseline = (await syncStatus(token)).lastAttemptAt
     const waitUntil = Date.now() + SYNC_INTERVAL_MS * 2
@@ -543,8 +555,21 @@ async function main(): Promise<void> {
     rayern.setUnauthorized(false)
     rayern.setDelayMs(SYNC_TIMEOUT_MS + 2000)
     await awaitTick(7, token)
-    const sync5 = await syncStatus(token)
-    check('hanging Rayern aborted with timeout error', (sync5.lastError ?? '').includes('timed out'))
+    // The hanging pull must be ABORTED by the timeout guard — poll for the
+    // postcondition instead of assuming the tick mapping: when the tick is
+    // first observed the attempt may still be in flight (it only fails once
+    // the effective timeout elapses).
+    const timeoutDeadline = Date.now() + 60_000
+    let sync5 = await syncStatus(token)
+    while (Date.now() < timeoutDeadline && !(sync5.lastError ?? '').includes('timed out')) {
+      await sleep(500)
+      sync5 = await syncStatus(token)
+    }
+    check(
+      'hanging Rayern aborted with timeout error',
+      (sync5.lastError ?? '').includes('timed out'),
+      `lastError=${sync5.lastError ?? 'null'}`,
+    )
     rayern.setDelayMs(0)
 
     console.log('\n— pull-sync: envelope-wrapped success payload (Rayern { success, data } convention) —')
@@ -724,7 +749,15 @@ async function main(): Promise<void> {
     )
     const sent = send.json as { from?: string; to?: string[]; cc?: string[]; bcc?: string[]; status?: string; type?: string }
     check('POST /emails/send → 201', send.status === 201)
-    check('From identity enforced server-side (attacker ignored)', sent.from === 'Rayern <support@rayern.com.ng>')
+    // The enforced identity is whatever config carries (FROM_EMAIL /
+    // FROM_EMAIL_NAME, defaulting to Rayern <no-reply@rayern.com.ng>): the
+    // request's attacker-supplied From must be ignored either way.
+    const expectedFrom = `${CHILD_ENV.FROM_EMAIL_NAME ?? 'Rayern'} <${CHILD_ENV.FROM_EMAIL ?? 'no-reply@rayern.com.ng'}>`
+    check(
+      'From identity enforced server-side (attacker ignored)',
+      sent.from === expectedFrom,
+      `from=${String(sent.from)} expected=${expectedFrom}`,
+    )
     check('To deduplicated case-insensitively (3 → 2)', sent.to?.length === 2)
     check('cross-field dedup: a@example.com dropped from CC', sent.cc?.includes('a@example.com') === false)
     check('cross-field dedup: c@example.com dropped from BCC', sent.bcc?.includes('c@example.com') === false)
@@ -1116,9 +1149,9 @@ async function main(): Promise<void> {
     )
 
     console.log('\n— sync schedule: startup log + 30-minute default —')
-    // CHILD_ENV sets RAYERN_SYNC_INTERVAL_MS=4000, which the config's safety
-    // floor clamps to 30s — the log must report the ACTUAL schedule (30s),
-    // never a stale 600000/600s value.
+    // CHILD_ENV sets RAYERN_SYNC_INTERVAL_MS=30000 (the config safety floor):
+    // the log must report that ACTUAL schedule — never a stale 600000/600s
+    // value.
     check(
       'startup log reports the configured pull interval',
       apiLog.text.includes('pull-sync enabled') && apiLog.text.includes('every 30s'),
@@ -1145,6 +1178,15 @@ async function main(): Promise<void> {
     process.exitCode = 1
   } finally {
     rayern.server.close()
+    // Close THIS process's database pool first: it points at the child's
+    // embedded Postgres, and its idle client would otherwise surface a stray
+    // "Connection terminated unexpectedly" the moment the child dies below.
+    try {
+      const { pool } = await import('./db')
+      await pool.end()
+    } catch {
+      // Pool was never opened (early crash) — nothing to close.
+    }
     child.kill('SIGTERM')
     // Give the API a moment to shut down, then force-exit (open handles in the
     // API are in the child process; here just the mock needs closing).
