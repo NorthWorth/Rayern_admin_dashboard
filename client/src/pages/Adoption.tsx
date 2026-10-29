@@ -8,7 +8,8 @@ import { useQuery } from '../hooks/useQuery'
 import { usePageRefresh } from '../hooks/usePageRefresh'
 import { workspacesService } from '../services/workspaces'
 import { platformMetricsService } from '../services/platformMetrics'
-import { formatNumber, titleCase } from '../lib/utils'
+import { rayernService } from '../services/rayern'
+import { formatCount, formatNumber, rayernReasonText, timeAgo, titleCase } from '../lib/utils'
 
 /**
  * Core Rayern modules. Workspace-level usage is measured per module (share of
@@ -37,7 +38,13 @@ const MODULES: Array<{ name: string; level: 'workspace' | 'workspace-events'; no
 export function AdoptionPage() {
   const wsQ = useQuery(() => workspacesService.stats())
   const metricsQ = useQuery(() => platformMetricsService.overview())
-  usePageRefresh([wsQ, metricsQ])
+  const instQ = useQuery(() => rayernService.blocks())
+  usePageRefresh([wsQ, metricsQ, instQ])
+
+  const adoption = instQ.data?.blocks.productAdoption ?? null
+  const adoptionReason = instQ.error
+    ? `Instrumentation could not be loaded: ${instQ.error}`
+    : rayernReasonText('not_reported')
 
   const total = wsQ.data?.total ?? null
 
@@ -46,7 +53,9 @@ export function AdoptionPage() {
       <PageHeader
         title="Product adoption"
         description="Which of Rayern's core modules workspaces are actually using."
-        footnote={`Reporting timezone: ${REPORTING_TIMEZONE} · adoption is measured at workspace level unless stated otherwise.`}
+        footnote={`Reporting timezone: ${REPORTING_TIMEZONE} · adoption is measured at workspace level unless stated otherwise.${
+          instQ.data?.syncedAt ? ` · instrumentation synced ${timeAgo(instQ.data.syncedAt)}` : ''
+        }`}
       />
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -65,8 +74,71 @@ export function AdoptionPage() {
           value={wsQ.loading ? '—' : String(wsQ.data?.avgMembersPerWorkspace ?? '—')}
           sub="From the workspace aggregate"
         />
-        <KpiCard label="Modules with usage data" value="0" sub="of 8 core modules instrumented" tone="amber" />
+        <KpiCard
+          label="Modules reported"
+          value={instQ.loading ? '—' : adoption ? String(adoption.modules.length) : '—'}
+          sub="Entity-level totals from Rayern, not workspace adoption"
+          tone={adoption ? 'default' : 'amber'}
+        />
       </div>
+
+      {/* -------- Entity-level records (Rayern `productAdoption` block) ------- */}
+      <Card>
+        <CardHeader
+          title="Module records"
+          subtitle="Total records and records created in the last 30 days, as reported by Rayern"
+          actions={
+            adoption === null ? <Badge tone="neutral">Awaiting sync</Badge> : <Badge tone="green">Rayern reported</Badge>
+          }
+        />
+        <CardBody>
+          {instQ.loading ? (
+            <LoadingBlock rows={5} />
+          ) : instQ.error ? (
+            <ErrorState message={instQ.error} onRetry={instQ.refetch} />
+          ) : adoption === null || !adoption.available || adoption.modules.length === 0 ? (
+            <UnavailablePanel
+              title="Module records"
+              reason={adoptionReason}
+              required="Rayern’s `productAdoption` metrics block inside GET /internal/dashboard-metrics."
+            />
+          ) : (
+            <>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-ink-200 bg-ivory-50 text-left text-[11px] font-semibold uppercase tracking-wide text-ink-500">
+                      <th scope="col" className="px-3 py-2.5">Module</th>
+                      <th scope="col" className="px-3 py-2.5 text-right">Total records</th>
+                      <th scope="col" className="px-3 py-2.5 text-right">Created · 30d</th>
+                      <th scope="col" className="px-3 py-2.5 text-right">Completed</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {adoption.modules.map((m) => (
+                      <tr key={m.module} className="border-b border-ink-100 last:border-0">
+                        <td className="px-3 py-2.5 font-medium capitalize text-ink-800">{titleCase(m.module)}</td>
+                        <td className="px-3 py-2.5 text-right tabular-nums text-ink-700">{formatCount(m.total)}</td>
+                        <td className="px-3 py-2.5 text-right tabular-nums text-ink-700">
+                          {formatCount(m.created30d)}
+                        </td>
+                        <td className="px-3 py-2.5 text-right tabular-nums text-ink-700">
+                          {m.completionReported ? formatCount(m.completed) : <span className="text-ink-400">n/a</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <MetricNote>
+                These are entity record counts, not workspace adoption — a module's total records never tells you how
+                many workspaces use it. Completion shows “n/a” where Rayern reports no completion concept for that
+                entity, and “—” where the value is unavailable; neither is ever rendered as 0.
+              </MetricNote>
+            </>
+          )}
+        </CardBody>
+      </Card>
 
       <Card>
         <CardHeader

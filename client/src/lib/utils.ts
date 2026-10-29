@@ -87,3 +87,45 @@ export function worstStatus(statuses: readonly HealthStatus[]): HealthStatus {
 export function clsx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(' ')
 }
+
+/* --------------------- Rayern instrumentation helpers -------------------- */
+
+/**
+ * Renders a count without ever turning "unavailable" into `0`.
+ * Missing, null and not-reported all render as an em dash.
+ */
+export function formatCount(value: number | null | undefined): string {
+  return value === null || value === undefined ? '—' : formatNumber(value)
+}
+
+/**
+ * Human text for Rayern's documented unavailability reasons plus the two the
+ * dashboard adds when a block is missing or unrecognised. Unknown codes fall
+ * back to a neutral sentence rather than being dropped silently.
+ */
+export function rayernReasonText(code: string | null | undefined): string {
+  if (!code) return 'No data is available for this metric.'
+  switch (code) {
+    case 'telemetry_inactive':
+      return 'Endpoint telemetry collection is switched off, so no measurements exist. Nothing was substituted for them.'
+    case 'insufficient_samples':
+      return 'Fewer samples than the configured minimum, so latency and availability figures are not reported.'
+    case 'no_checks_run':
+      return 'No checks recorded yet.'
+    case 'no_activity_data_yet':
+      return 'No activity events have been recorded yet, so active-user and retention figures cannot be computed.'
+    case 'not_reported':
+      return 'Rayern has not reported this yet — it is not present in the last synchronized payload.'
+    case 'unrecognised_shape':
+      return 'Rayern responded with a structure the dashboard does not recognise, so nothing is displayed rather than showing incorrect numbers.'
+    default:
+      return `Unavailable (${code}).`
+  }
+}
+
+/** Percent of `part` in `whole`, or null when the denominator is 0/unknown. */
+export function safePct(part: number | null | undefined, whole: number | null | undefined): number | null {
+  if (part === null || part === undefined || whole === null || whole === undefined) return null
+  if (!Number.isFinite(part) || !Number.isFinite(whole) || whole <= 0) return null
+  return Math.round((part / whole) * 1000) / 10
+}

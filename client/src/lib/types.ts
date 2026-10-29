@@ -454,3 +454,210 @@ export interface CampaignSendResponse {
     createdAt?: string
   }
 }
+
+/* ===========================================================================
+ * Rayern instrumentation & monitoring (contract: Instrumentation & Monitoring)
+ *
+ * Mirrors the dashboard backend's normalized DTOs (server/src/instrumentation.ts).
+ * `null` always means "not available / not reported" — it is never rendered as 0.
+ * =========================================================================== */
+
+export interface FunnelDailyPoint {
+  date: string
+  visits: number | null
+  signupIntents: number | null
+  registrations: number | null
+  activated: number | null
+}
+
+export interface FunnelBlock {
+  hasVisitorData: boolean
+  visits30d: number | null
+  signupIntents30d: number | null
+  registrations30d: number | null
+  activated30d: number | null
+  attributedSignups30d: number | null
+  daily: FunnelDailyPoint[]
+  topSources: Array<{ source: string; count: number }>
+  /** Denominators are named in the field; `null` = not computable (0 or unknown). */
+  conversion: {
+    visitToIntentPct: number | null
+    intentToRegistrationPct: number | null
+    registrationToActivationPct: number | null
+    visitToRegistrationPct: number | null
+  }
+  attributionCoveragePct: number | null
+}
+
+/** Rayern's four client-reported error kinds (§5). */
+export type ClientErrorKind = 'api_error' | 'network_error' | 'unexpected_response' | 'config_error' | string
+
+export const CLIENT_ERROR_KIND_LABELS: Record<string, string> = {
+  api_error: 'API error',
+  network_error: 'Network error',
+  unexpected_response: 'Unexpected response',
+  config_error: 'Configuration error',
+}
+
+/** Kinds that usually indicate a wrong API base URL or frontend misconfiguration. */
+export const CLIENT_ERROR_CONFIG_HINT: Record<string, string> = {
+  unexpected_response: 'HTML or a non-JSON body came back where JSON was expected — often a wrong API base URL.',
+  config_error: 'The browser could not build a usable API base URL at startup.',
+}
+
+export interface ClientErrorsBlock {
+  total: number | null
+  byKind: Array<{ kind: ClientErrorKind; count: number }>
+  topEndpoints: Array<{ endpoint: string; count: number }>
+  lastOccurredAt: string | null
+}
+
+export interface EndpointHealthRoute {
+  key: string
+  method: string
+  route: string
+  requests: number
+  ok2xx: number
+  err4xx: number
+  err5xx: number
+  p50Ms: number | null
+  p95Ms: number | null
+  samples: number | null
+  unmatched: boolean
+}
+
+export interface EndpointHealthBlock {
+  available: boolean
+  reason: string | null
+  windowMinutes: number | null
+  routes: EndpointHealthRoute[]
+}
+
+export interface DependencyConfigItem {
+  group: string
+  name: string
+  label: string
+  configured: boolean | null
+  detail: string | null
+}
+
+export interface DependencyConfigBlock {
+  available: boolean
+  items: DependencyConfigItem[]
+}
+
+export interface SyntheticCheck {
+  name: string
+  status: string
+  httpStatus: number | null
+  latencyMs: number | null
+  p95Ms: number | null
+  reason: string | null
+  consecutiveFailures: number | null
+  lastSuccessAt: string | null
+  lastFailureAt: string | null
+  lastRecoveredAt: string | null
+  history: Array<{ at: string; status: string; httpStatus: number | null; latencyMs: number | null }>
+}
+
+export interface SyntheticMonitoringBlock {
+  available: boolean
+  reason: string | null
+  lastCheckedAt: string | null
+  lastSuccessfulCheckAt: string | null
+  checks: SyntheticCheck[]
+}
+
+export interface ProductAdoptionModule {
+  module: string
+  total: number | null
+  created30d: number | null
+  completed: number | null
+  completionReported: boolean
+}
+
+export interface ProductAdoptionBlock {
+  available: boolean
+  modules: ProductAdoptionModule[]
+}
+
+export interface MarketingConsentBlock {
+  totalRegisteredUsers: number | null
+  optedIn: number | null
+  optedOut: number | null
+  optedInPct: number | null
+  /** False = the three figures disagree; flagged, never corrected. */
+  reconciles: boolean
+}
+
+export interface EngagementCohort {
+  weekStart: string
+  size: number | null
+  retainedNextWeek: number | null
+  retentionPct: number | null
+  /** False while the following week has not elapsed — not a 0% result. */
+  mature: boolean
+}
+
+export interface EngagementBlock {
+  available: boolean
+  reason: string | null
+  dau: number | null
+  wau: number | null
+  mau: number | null
+  dailyActiveUsers: Array<{ date: string; count: number | null }>
+  cohorts: EngagementCohort[]
+}
+
+export interface InstrumentationBlocks {
+  funnel: FunnelBlock | null
+  clientErrors: ClientErrorsBlock | null
+  endpointHealth: EndpointHealthBlock | null
+  dependencyConfig: DependencyConfigBlock | null
+  syntheticMonitoring: SyntheticMonitoringBlock | null
+  productAdoption: ProductAdoptionBlock | null
+  marketingConsent: MarketingConsentBlock | null
+  engagement: EngagementBlock | null
+}
+
+export interface InstrumentationResponse {
+  blocks: InstrumentationBlocks
+  syncedAt: string | null
+  /** Keys Rayern actually sent. Absent = never received (not "empty"). */
+  received: string[]
+}
+
+/** One server log line. Sanitized upstream and allow-listed by the proxy. */
+export interface RayernLogEntry {
+  at: string | null
+  level: string | null
+  code: string | null
+  message: string | null
+  status: number | null
+  method: string | null
+  route: string | null
+  requestId: string | null
+}
+
+export interface RayernLogMeta {
+  source: string
+  requestId: string | null
+  fetchedAt: string
+  level: string | null
+  since: string | null
+  limit: number
+  retentionDays: number
+  maxEntries: number
+  durable: boolean
+  note: string
+}
+
+export interface RayernLogsResponse {
+  entries: RayernLogEntry[]
+  meta: RayernLogMeta
+}
+
+export interface SyntheticResponse {
+  synthetic: SyntheticMonitoringBlock
+  meta: { source: string; requestId: string | null; fetchedAt: string; durable: boolean; note: string }
+}

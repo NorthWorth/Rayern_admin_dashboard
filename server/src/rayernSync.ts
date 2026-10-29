@@ -293,6 +293,132 @@ export async function readSyncedAggregates(): Promise<{
   }
 }
 
+/* ---------------- Instrumentation & monitoring blocks -------------------- */
+
+/**
+ * Rayern's instrumentation/monitoring blocks arrive in the SAME `{ success,
+ * data }` envelope as the core aggregates. Per the contract each block is
+ * ADDITIVE and computed behind its own guard, so a block may be `null` when
+ * that one aggregation failed upstream.
+ *
+ * Four rules are enforced here:
+ *
+ *  1. Each block is accepted or rejected on its own. A structurally
+ *     unexpected block is dropped with a log line — it can never fail the sync
+ *     or invalidate accounts/workspaces/billing.
+ *  2. `null` (upstream aggregation failed), "absent" (upstream did not send
+ *     it) and a stored value are three distinct states. None of them is ever
+ *     written as `{}`, which would later read back as "0 errors", "no traffic"
+ *     or "0% conversion".
+ *  3. Only this allow-list is persisted — the same strip-unknown privacy
+ *     contract the core payload uses.
+ *  4. Blocks are stored under their own keys, so a later sync that omits one
+ *     keeps the last known-good value (exactly how `billing` already behaves) 
+ *     instead of silently blanking it.
+ */
+export const INSTRUMENTATION_KEYS = [
+  'funnel',
+  'clientErrors',
+  'endpointHealth',
+  'dependencyConfig',
+  'syntheticMonitoring',
+  'productAdoption',
+  'marketingConsent',
+  'engagement',
+] as const
+
+export type InstrumentationKey = (typeof INSTRUMENTATION_KEYS)[number]
+/** A block Rayern sent: an object, or `null` for the explicit upstream guard. */
+export type InstrumentationBlock = Record<string, unknown> | null
+export type InstrumentationBlocks = Partial<Record<InstrumentationKey, InstrumentationBlock>>
+
+const INSTRUMENTATION_ROW_PREFIX = 'instrumentation:'
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Splits instrumentation blocks out of an unwrapped Rayern payload.
+ * Never throws; unknown shapes land in `rejected` for operational logging.
+ */
+export function extractInstrumentation(raw: unknown): {
+  blocks: InstrumentationBlocks
+  present: InstrumentationKey[]
+  rejected: InstrumentationKey[]
+} {
+  const blocks: InstrumentationBlocks = {}
+  const present: InstrumentationKey[] = []
+  const rejected: InstrumentationKey[] = []
+  if (!isPlainObject(raw)) return { blocks, present, rejected }
+
+  for (const key of INSTRUMENTATION_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(raw, key)) continue
+    const value = raw[key]
+    if (value === null) {
+      // Explicit upstream "this aggregation failed" sentinel.
+      blocks[key] = null
+      present.push(key)
+      continue
+    }
+    if (isPlainObject(value)) {
+      blocks[key] = value
+      present.push(key)
+      continue
+    }
+    rejected.push(key)
+  }
+  return { blocks, present, rejected }
+}
+
+/** Persists instrumentation blocks under their own `rayern_sync_state` keys. */
+export async function storeInstrumentation(blocks: InstrumentationBlocks): Promise<InstrumentationKey[]> {
+  const stored: InstrumentationKey[] = []
+  for (const key of INSTRUMENTATION_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(blocks, key)) continue
+    await query(
+      `INSERT INTO rayern_sync_state (key, payload, updated_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`,
+      [`${INSTRUMENTATION_ROW_PREFIX}${key}`, JSON.stringify(blocks[key] ?? null)],
+    )
+    stored.push(key)
+  }
+  return stored
+}
+
+/**
+ * Reads the latest persisted instrumentation blocks.
+ *
+ * `blocks` only contains keys that were actually stored: a block that has
+ * never been synchronized is ABSENT (undefined), an explicitly-null upstream
+ * guard is `null`, and `syncedAt` reports when the newest of them was written
+ * so the UI can show data freshness rather than implying live data.
+ */
+export async function readInstrumentationBlocks(): Promise<{
+  blocks: InstrumentationBlocks
+  syncedAt: string | null
+}> {
+  const rows = await query<{ key: string; payload: unknown; updated_at: Date }>(
+    `SELECT key, payload, updated_at
+     FROM rayern_sync_state
+     WHERE key LIKE '${INSTRUMENTATION_ROW_PREFIX}%'`,
+  )
+
+  const blocks: InstrumentationBlocks = {}
+  let latest: Date | null = null
+  for (const row of rows) {
+    if (latest === null || row.updated_at > latest) latest = row.updated_at
+    const key = row.key.slice(INSTRUMENTATION_ROW_PREFIX.length) as InstrumentationKey
+    if (!(INSTRUMENTATION_KEYS as readonly string[]).includes(key)) continue
+    // JSONB `null` arrives as JS null; objects arrive as objects. Anything
+    // else would be a corruption, so treat it as "not stored".
+    blocks[key] = row.payload === null ? null : isPlainObject(row.payload) ? row.payload : undefined
+    if (blocks[key] === undefined) delete blocks[key]
+  }
+  return { blocks, syncedAt: latest ? latest.toISOString() : null }
+}
+
 // Re-export query because this module already owns the persistence helpers.
 import { query } from './db'
 import { config, rayernSyncEnabled } from './config'
@@ -315,6 +441,9 @@ export function describeSyncShape(raw: unknown): string {
   if (inner.accounts !== undefined) flags.push('accounts=true')
   if (inner.workspaces !== undefined) flags.push('workspaces=true')
   if (Array.isArray(inner.services)) flags.push(`services=${inner.services.length}`)
+  const instrumented = extractInstrumentation(inner)
+  if (instrumented.present.length > 0) flags.push(`instrumentation=${instrumented.present.length}`)
+  if (instrumented.rejected.length > 0) flags.push(`instrumentationRejected=${instrumented.rejected.length}`)
   if (Object.keys(inner).length === 0) flags.push('container=empty')
   return flags.join(' ') || 'unrecognized'
 }
@@ -592,6 +721,27 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
     )
 
     const sections = await storePayload(parsed.data)
+
+    // Instrumentation blocks are additive and best-effort: they are validated
+    // and persisted separately so a malformed block can never fail a sync that
+    // already carried valid core aggregates (and vice versa).
+    const { blocks: instrumentation, present, rejected } = extractInstrumentation(unwrapped.value)
+    if (rejected.length > 0) {
+      // Field names only — never payload values.
+      console.log(`[dashboard-sync] instrumentation block(s) dropped (unexpected shape): ${rejected.join(',')}`)
+    }
+    let instrumentationSections: string[] = []
+    if (present.length > 0) {
+      try {
+        instrumentationSections = await storeInstrumentation(instrumentation)
+      } catch (storeErr) {
+        // Core aggregates are already durable; a storage hiccup here must not
+        // turn a successful pull into a recorded failure. Next sync retries.
+        console.error('[dashboard-sync] failed to persist instrumentation blocks:', storeErr)
+      }
+    }
+    sections.push(...instrumentationSections)
+
     console.log(
       `[dashboard-sync] Rayern metrics persisted: totalAccounts=${parsed.data.accounts ? parsed.data.accounts.totalAccounts : 'n/a'} sections=${sections.join(',') || 'none'}`,
     )

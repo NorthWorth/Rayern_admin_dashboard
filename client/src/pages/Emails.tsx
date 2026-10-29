@@ -12,10 +12,12 @@ import { useToast } from '../components/ui/Toast'
 import { useQuery } from '../hooks/useQuery'
 import { usePageRefresh } from '../hooks/usePageRefresh'
 import { emailsService } from '../services/emails'
+import { rayernService } from '../services/rayern'
 import { CampaignComposer } from '../components/CampaignComposer'
+import { UnavailablePanel } from '../components/UnavailablePanel'
 import { DEFAULT_FROM } from '../lib/api'
-import { formatDateTime, formatNumber, titleCase } from '../lib/utils'
-import type { EmailStatus, EmailType } from '../lib/types'
+import { formatCount, formatDateTime, formatNumber, rayernReasonText, timeAgo, titleCase } from '../lib/utils'
+import type { EmailStatus, EmailType, MarketingConsentBlock } from '../lib/types'
 
 const TYPE_LABELS: Record<EmailType, string> = {
   update: 'Product update',
@@ -46,9 +48,11 @@ function typeTone(t: EmailType): 'blue' | 'green' | 'amber' | 'neutral' {
 export function EmailsPage() {
   const listQ = useQuery(() => emailsService.list())
   const statsQ = useQuery(() => emailsService.stats())
+  // Rayern's marketing-consent block (synchronized aggregates from Rayern).
+  const consentQ = useQuery(() => rayernService.blocks())
   // Navbar refresh re-runs the campaign list and stats; the composer and any
   // open preview keep their state.
-  usePageRefresh([listQ, statsQ])
+  usePageRefresh([listQ, statsQ, consentQ])
   const [composerOpen, setComposerOpen] = useState(false)
   const [campaignOpen, setCampaignOpen] = useState(false)
   const [copySource, setCopySource] = useState<string | null>(null)
@@ -113,6 +117,14 @@ export function EmailsPage() {
           </CardBody>
         </Card>
       </div>
+
+      <MarketingConsentCard
+        block={consentQ.data?.blocks.marketingConsent ?? null}
+        syncedAt={consentQ.data?.syncedAt ?? null}
+        loading={consentQ.loading}
+        error={consentQ.error}
+        onRetry={consentQ.refetch}
+      />
 
       <Card>
         <CardHeader
@@ -352,5 +364,76 @@ export function EmailComposer({ open, copyId, onClose, onSent }: { open: boolean
         </div>
       </div>
     </Modal>
+  )
+}
+
+/**
+ * Rayern's marketing-consent aggregates.
+ *
+ * Consent is an email-eligibility concern kept distinct from registration and
+ * email verification, and Rayern revalidates it server-side when a campaign is
+ * sent — this panel reports the figures, it is not the enforcement point.
+ * Inconsistent counts are flagged exactly as reported, never corrected here.
+ */
+function MarketingConsentCard({
+  block,
+  syncedAt,
+  loading,
+  error,
+  onRetry,
+}: {
+  block: MarketingConsentBlock | null
+  syncedAt: string | null
+  loading: boolean
+  error: string | null
+  onRetry: () => void
+}) {
+  return (
+    <Card>
+      <CardHeader
+        title="Marketing consent (Rayern)"
+        subtitle="Registered users' marketing opt-in state as synchronized from Rayern"
+        actions={syncedAt ? <span className="whitespace-nowrap text-xs text-ink-500">Synced {timeAgo(syncedAt)}</span> : null}
+      />
+      <CardBody>
+        {loading ? (
+          <LoadingBlock rows={3} />
+        ) : error ? (
+          <ErrorState message={error} onRetry={onRetry} />
+        ) : !block ? (
+          <UnavailablePanel
+            title="Marketing consent not reported"
+            reason="Rayern has not sent a `marketingConsent` block in the last synchronized payload, so no opt-in figures are shown."
+            required="The `marketingConsent` metrics block inside GET /internal/dashboard-metrics, picked up by the pull-sync worker."
+          />
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              <KpiCard label="Opted in" value={formatCount(block.optedIn)} />
+              <KpiCard label="Opted out" value={formatCount(block.optedOut)} />
+              <KpiCard label="Registered users" value={formatCount(block.totalRegisteredUsers)} />
+              <KpiCard
+                label="Opt-in share"
+                value={block.optedInPct != null ? `${block.optedInPct.toFixed(1)}%` : '—'}
+                sub={block.optedInPct != null ? undefined : 'Undefined on an empty base'}
+              />
+            </div>
+
+            {!block.reconciles ? (
+              <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800" role="alert">
+                <span className="font-semibold">Inconsistent report:</span> opted-in + opted-out does not equal the reported
+                registered total. The figures are shown exactly as Rayern reported them — not corrected here.
+              </div>
+            ) : null}
+
+            <p className="mt-3 text-xs leading-relaxed text-ink-500">
+              Marketing consent is separate from registration and email verification, and says nothing about transactional
+              email eligibility. Rayern revalidates consent on its own backend when a campaign is sent, so this panel is a
+              report — frontend recipient filters are never the enforcement point.
+            </p>
+          </>
+        )}
+      </CardBody>
+    </Card>
   )
 }
