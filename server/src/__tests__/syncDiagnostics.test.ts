@@ -79,12 +79,13 @@ describe('pickDiagnosticHeaders', () => {
     expect(picked['server']).toBe('rayern-edge')
     expect(picked['x-request-id']).toBe('req_abc123')
     expect(picked['x-edge-node']).toBe('fra1')
+    // Non-sensitive headers are now captured (not just an allow-list).
+    expect(picked['content-length']).toBe('123')
     // Credential-shaped headers are absent even when they carry an X- prefix.
     expect(picked['x-api-key']).toBeUndefined()
     expect(picked['x-auth-token']).toBeUndefined()
     expect(picked['authorization']).toBeUndefined()
     expect(picked['cookie']).toBeUndefined()
-    expect(picked['content-length']).toBeUndefined()
 
     expect(JSON.stringify(picked)).not.toContain('should-not-be-stored')
   })

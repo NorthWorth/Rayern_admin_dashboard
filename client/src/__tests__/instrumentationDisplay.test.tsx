@@ -311,6 +311,9 @@ describe('System — server-side Rayern sync diagnostics', () => {
     responseBody: '{"error":{"message":"aggregation failed for [redacted-email]"}}',
     headers: { 'retry-after': '30', server: 'rayern-edge', 'x-request-id': 'req_diag_500' },
     requestId: 'req_diag_500',
+    startedAt: '2026-10-28T05:58:59.000Z',
+    finalUrl: 'https://api.rayern.test/internal/dashboard-metrics',
+    reachedApplication: false,
   }
 
   test('renders the failure details captured at the outbound HTTP layer', async () => {

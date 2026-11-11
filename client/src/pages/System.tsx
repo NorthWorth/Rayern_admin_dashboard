@@ -447,6 +447,11 @@ function SyncDiagnosticsCard({
                     </span>
                     <span className="text-xs text-ink-500">
                       {d.status !== null ? `HTTP ${d.status}` : 'no response'} · {formatDuration(d.durationMs)} · {d.host}
+                      {d.reachedApplication === null
+                        ? ''
+                        : d.reachedApplication
+                          ? ' · reached Express app'
+                          : ' · did NOT reach Express app (edge/proxy)'}
                     </span>
                     <span className="ml-auto whitespace-nowrap text-xs text-ink-500" title={formatDateTime(d.occurredAt)}>
                       {timeAgo(d.occurredAt)}
@@ -461,6 +466,13 @@ function SyncDiagnosticsCard({
                     <pre className="mt-1.5 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded border border-ink-200 bg-ink-50 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-ink-700">
                       {d.responseBody}
                     </pre>
+                  ) : null}
+
+                  {d.finalUrl ? (
+                    <p className="mt-1 font-mono text-[11px] text-ink-500 break-all">final URL: {d.finalUrl}</p>
+                  ) : null}
+                  {d.startedAt ? (
+                    <p className="font-mono text-[11px] text-ink-500">request started: {formatDateTime(d.startedAt)}</p>
                   ) : null}
 
                   {(Object.keys(d.headers).length > 0 || d.requestId) ? (
