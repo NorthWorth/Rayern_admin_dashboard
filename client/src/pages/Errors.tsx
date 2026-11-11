@@ -5,11 +5,14 @@ import { Badge, StatusBadge } from '../components/ui/Badge'
 import { Drawer } from '../components/ui/Drawer'
 import { Select } from '../components/ui/Input'
 import { EmptyState, ErrorState, LoadingBlock } from '../components/ui/states'
+import { UnavailablePanel } from '../components/UnavailablePanel'
 import { errorsService } from '../services/errors'
+import { rayernService } from '../services/rayern'
 import { useDebouncedValue } from '../hooks/useDebouncedValue'
 import { useQuery } from '../hooks/useQuery'
 import { usePageRefresh } from '../hooks/usePageRefresh'
-import { formatDateTime, timeAgo } from '../lib/utils'
+import { formatCount, formatDateTime, rayernReasonText, timeAgo } from '../lib/utils'
+import { CLIENT_ERROR_CONFIG_HINT, CLIENT_ERROR_KIND_LABELS } from '../lib/types'
 import type { ErrorEntry, ErrorSeverity } from '../lib/types'
 
 function severityTone(s: ErrorSeverity): 'neutral' | 'amber' | 'red' {
@@ -33,12 +36,126 @@ export function ErrorsPage() {
     () => errorsService.list({ search: debouncedSearch, severity }),
     [debouncedSearch, severity],
   )
-  usePageRefresh([listQ])
+  const instQ = useQuery(() => rayernService.blocks())
+  usePageRefresh([listQ, instQ])
+
+  const clientErrors = instQ.data?.blocks.clientErrors ?? null
+  const clientErrorsReason = instQ.error
+    ? `Instrumentation could not be loaded: ${instQ.error}`
+    : rayernReasonText('not_reported')
 
   const errors = listQ.data ?? []
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6">
+      <Card>
+        <CardHeader
+          title="Client-reported errors"
+          subtitle="Errors the browser told Rayern about — distinct from the server log and from synthetic checks"
+          actions={
+            clientErrors === null ? <Badge tone="neutral">Awaiting sync</Badge> : <Badge tone="green">Rayern reported</Badge>
+          }
+        />
+        {instQ.loading ? (
+          <CardBody>
+            <LoadingBlock rows={4} />
+          </CardBody>
+        ) : instQ.error ? (
+          <ErrorState message={instQ.error} onRetry={instQ.refetch} />
+        ) : clientErrors === null ? (
+          <CardBody>
+            <UnavailablePanel
+              title="Client-side error telemetry"
+              reason={clientErrorsReason}
+              required="Rayern’s `clientErrors` metrics block, built from POST /api/v1/telemetry/client-errors."
+            />
+          </CardBody>
+        ) : (
+          <CardBody className="space-y-4">
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <div className="rounded-lg border border-ink-200 bg-white px-4 py-3.5">
+                <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-ink-500">Total · 30d</p>
+                <p className="mt-1.5 font-display text-3xl leading-none tabular-nums text-ink-900">
+                  {formatCount(clientErrors.total)}
+                </p>
+                <p className="mt-1.5 text-xs text-ink-500">Browser-reported, deduplicated per session</p>
+              </div>
+              <div className="rounded-lg border border-ink-200 bg-white px-4 py-3.5">
+                <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-ink-500">Affected endpoints</p>
+                <p className="mt-1.5 font-display text-3xl leading-none tabular-nums text-ink-900">
+                  {clientErrors.topEndpoints.length}
+                </p>
+                <p className="mt-1.5 text-xs text-ink-500">Route templates, never full paths</p>
+              </div>
+              <div className="rounded-lg border border-ink-200 bg-white px-4 py-3.5">
+                <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-ink-500">Last occurrence</p>
+                <p className="mt-2 text-sm font-medium text-ink-900">
+                  {clientErrors.lastOccurredAt ? timeAgo(clientErrors.lastOccurredAt) : '—'}
+                </p>
+                <p className="mt-1.5 text-xs text-ink-500">
+                  {clientErrors.lastOccurredAt ? formatDateTime(clientErrors.lastOccurredAt) : 'Not reported'}
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <div>
+                <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.12em] text-ink-500">By kind</p>
+                {clientErrors.byKind.length === 0 ? (
+                  <p className="rounded-md border border-dashed border-ink-300 bg-ivory-50 px-3 py-3 text-xs text-ink-600">
+                    No kinds reported for this window.
+                  </p>
+                ) : (
+                  <ul className="divide-y divide-ink-100 rounded-md border border-ink-200 bg-white">
+                    {clientErrors.byKind.map((k) => (
+                      <li key={k.kind} className="px-3 py-2.5">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-sm font-medium text-ink-800">
+                            {CLIENT_ERROR_KIND_LABELS[k.kind] ?? k.kind}
+                          </span>
+                          <span className="tabular-nums text-sm text-ink-700">{formatCount(k.count)}</span>
+                        </div>
+                        {CLIENT_ERROR_CONFIG_HINT[k.kind] ? (
+                          <p className="mt-1 text-xs leading-relaxed text-amber-700">
+                            {CLIENT_ERROR_CONFIG_HINT[k.kind]}
+                          </p>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              <div>
+                <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.12em] text-ink-500">
+                  Top endpoint templates
+                </p>
+                {clientErrors.topEndpoints.length === 0 ? (
+                  <p className="rounded-md border border-dashed border-ink-300 bg-ivory-50 px-3 py-3 text-xs text-ink-600">
+                    No endpoint templates reported for this window.
+                  </p>
+                ) : (
+                  <ul className="divide-y divide-ink-100 rounded-md border border-ink-200 bg-white">
+                    {clientErrors.topEndpoints.map((e) => (
+                      <li key={e.endpoint} className="flex items-center justify-between gap-3 px-3 py-2.5">
+                        <code className="truncate text-[13px] text-ink-700">{e.endpoint}</code>
+                        <span className="shrink-0 tabular-nums text-sm text-ink-700">{formatCount(e.count)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+
+            <p className="rounded-md border border-ink-200 bg-ivory-50 px-3 py-2.5 text-xs leading-relaxed text-ink-600">
+              These are reported by the browser and scrubbed twice (client, then Rayern) before storage: no request
+              bodies, headers, tokens or credentials are ever included. Server-side failures are listed below and in the
+              server log on the Observability page; synthetic-probe results live on System.
+            </p>
+          </CardBody>
+        )}
+      </Card>
+
       <Card>
         <CardHeader
           title="Recent errors"

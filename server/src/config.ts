@@ -247,6 +247,25 @@ export const config = {
 
 export const rayernSyncEnabled = (): boolean => config.rayern.syncEndpoint.length > 0
 
+/**
+ * Origin (`scheme://host[:port]`) of the Rayern API, used ONLY by the backend
+ * for server-to-server calls to Rayern's monitoring-token endpoints
+ * (`/internal/logs`, `/internal/synthetic-monitoring`).
+ *
+ * Resolution order: the explicit base URL, then the origin of the configured
+ * sync endpoint. Returns '' when neither is usable, and callers must treat that
+ * as "not configured" — it never falls back to a guessed host.
+ */
+export function rayernInternalOrigin(): string {
+  if (config.rayern.apiBaseUrl) return config.rayern.apiBaseUrl
+  if (!config.rayern.syncEndpoint) return ''
+  try {
+    return new URL(config.rayern.syncEndpoint).origin
+  } catch {
+    return ''
+  }
+}
+
 /** True when the dashboard backend can reach Rayern's admin API (proxy). */
 export const rayernAdminProxyEnabled = (): boolean =>
   config.rayern.apiBaseUrl.length > 0 &&

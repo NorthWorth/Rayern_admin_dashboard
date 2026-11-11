@@ -439,6 +439,29 @@ export async function initDb(): Promise<void> {
     CHECK (status IN ('healthy','degraded','failing','unknown'))
   `)
 
+  // Outbound Rayern failure diagnostics: one bounded row per failed
+  // server-to-server call (sync pull or internal proxy), sanitized before it
+  // is written. Retained newest-first; the writer prunes to 200 rows.
+  await query(`
+    CREATE TABLE IF NOT EXISTS rayern_sync_diagnostics (
+      id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      occurred_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+      source        TEXT NOT NULL DEFAULT 'sync',
+      endpoint      TEXT NOT NULL DEFAULT '',
+      host          TEXT NOT NULL DEFAULT '',
+      method        TEXT NOT NULL DEFAULT 'GET',
+      outcome       TEXT NOT NULL DEFAULT 'http_error',
+      status        INTEGER,
+      duration_ms   NUMERIC NOT NULL DEFAULT 0,
+      error_code    TEXT,
+      message       TEXT NOT NULL DEFAULT '',
+      response_body TEXT,
+      headers       JSONB NOT NULL DEFAULT '{}',
+      request_id    TEXT
+    )
+  `)
+  await query(`CREATE INDEX IF NOT EXISTS idx_rayern_sync_diagnostics_time ON rayern_sync_diagnostics (occurred_at DESC)`)
+
   // Sync observability: duration + last HTTP status of the most recent pull.
   await query(`ALTER TABLE sync_status ADD COLUMN IF NOT EXISTS last_duration_ms INTEGER`)
   await query(`ALTER TABLE sync_status ADD COLUMN IF NOT EXISTS last_http_status INTEGER`)

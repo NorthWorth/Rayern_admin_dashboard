@@ -36,6 +36,7 @@ import observabilityRoutes from './routes/observability'
 import auditRoutes from './routes/audit'
 import marketingRoutes from './routes/marketing'
 import rayernAdminRoutes from './routes/rayernAdmin'
+import rayernInternalRoutes from './routes/rayernInternal'
 import { metricsRouter } from './routes/metrics'
 import { startSyncWorker } from './rayernSync'
 import { initTelemetry, telemetryMiddleware } from './telemetry'
@@ -147,6 +148,10 @@ app.use('/audit', requireAdmin, auditRoutes)
 // Marketing (consent-gated campaign metrics/directory of the dashboard's own
 // accounts) — same root-mounted, no-prefix convention as every other group.
 app.use('/marketing', requireAdmin, marketingRoutes)
+// Rayern instrumentation & monitoring (dashboard-side view of the synced metric
+// blocks, plus server-to-server access to Rayern's monitoring-token endpoints).
+// Admin-only; the monitoring token never reaches the browser.
+app.use('/rayern', requireAdmin, rayernInternalRoutes)
 
 /* ------------------------------ Static SPA -------------------------------- */
 

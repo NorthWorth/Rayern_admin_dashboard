@@ -18,8 +18,9 @@ import { auditService } from '../services/audit'
 import { errorsService } from '../services/errors'
 import { marketingService } from '../services/marketing'
 import { revenueService } from '../services/revenue'
+import { rayernService } from '../services/rayern'
 import { completeDailySeries, summariseTrend } from '../lib/period'
-import { formatCurrencyMajor, formatDate, formatDateTime, formatNumber, titleCase } from '../lib/utils'
+import { formatCount, formatCurrencyMajor, formatDate, formatDateTime, formatNumber, rayernReasonText, titleCase } from '../lib/utils'
 import type { HealthStatus } from '../lib/types'
 
 function healthTone(s: HealthStatus): 'green' | 'amber' | 'red' {
@@ -76,9 +77,12 @@ export function OverviewPage() {
   const errorsQ = useQuery(() => errorsService.list())
   const marketingQ = useQuery(() => marketingService.metrics())
   const recentUsersQ = useQuery(() => usersService.list({ page: 1, pageSize: 5 }))
+  // Rayern instrumentation blocks (funnel activation, engagement) — proxied by
+  // the dashboard backend like every other Rayern read.
+  const instQ = useQuery(() => rayernService.blocks())
 
   // The navbar refreshes exactly these queries, preserving the selected period.
-  usePageRefresh([metricsQ, usersQ, wsQ, revenueQ, systemQ, auditQ, errorsQ, marketingQ, recentUsersQ])
+  usePageRefresh([metricsQ, usersQ, wsQ, revenueQ, systemQ, auditQ, errorsQ, marketingQ, recentUsersQ, instQ])
 
   const trend = metricsQ.data?.registrationsTrend ?? []
   const series = useMemo(() => completeDailySeries(trend), [trend])
@@ -96,6 +100,8 @@ export function OverviewPage() {
   const recentEvents = (auditQ.data ?? []).slice(0, 6)
   const openErrors = errorsQ.data ?? []
   const consent = marketingQ.data?.consent ?? null
+  const funnel = instQ.data?.blocks.funnel ?? null
+  const engagement = instQ.data?.blocks.engagement ?? null
 
   const alerts: Array<{ tone: 'amber' | 'red'; text: string; to: string }> = []
   if (sync?.stale) {
@@ -201,20 +207,35 @@ export function OverviewPage() {
           </Link>
         </KpiCard>
 
-        <KpiCard label="Activated users" value="—">
-          <p className="mt-2 text-xs leading-relaxed text-ink-600">
-            Not measured — activation is not instrumented, so no activation count exists. Total users are not used as a
-            substitute.
-          </p>
+        <KpiCard
+          label="Activated users"
+          value={funnel?.activated30d != null ? formatNumber(funnel.activated30d) : '—'}
+          sub="Last 30 days"
+          note={
+            funnel?.activated30d == null
+              ? instQ.loading
+                ? 'Loading…'
+                : 'Not reported yet — Rayern has no activation count in its last synchronized payload.'
+              : 'Rayern activation: onboarding completed (provisional definition)'
+          }
+        >
           <Link to="/funnels" className="mt-2 inline-block text-xs font-medium text-champagne-700 hover:text-champagne-800">
-            What would be needed →
+            Funnel detail →
           </Link>
         </KpiCard>
 
-        <KpiCard label="Active users" value="—">
-          <p className="mt-2 text-xs leading-relaxed text-ink-600">
-            Not measured — there is no daily-activity instrumentation, so DAU/WAU/MAU cannot be computed.
-          </p>
+        <KpiCard
+          label="Active users"
+          value={engagement?.available && engagement.mau != null ? formatNumber(engagement.mau) : '—'}
+          sub={engagement?.available ? 'Monthly active (30d)' : undefined}
+          note={
+            engagement?.available
+              ? `DAU ${formatCount(engagement.dau)} · WAU ${formatCount(engagement.wau)} · MAU ${formatCount(engagement.mau)}`
+              : instQ.loading
+                ? 'Loading…'
+                : rayernReasonText(engagement === null ? 'not_reported' : engagement.reason)
+          }
+        >
           <Link to="/retention" className="mt-2 inline-block text-xs font-medium text-champagne-700 hover:text-champagne-800">
             Retention detail →
           </Link>
@@ -296,8 +317,9 @@ export function OverviewPage() {
             </div>
           </dl>
           <MetricNote>
-            Visitor, onboarding, activation and retention stages are not instrumented and are shown as unavailable on
-            the funnel page.
+            {funnel
+              ? 'Visitor and signup-intent stages come from Rayern’s funnel block — see the funnel page for exact stages and denominators.'
+              : 'Visitor, onboarding, activation and retention stages are shown as unavailable on the funnel page until Rayern reports its funnel block.'}
           </MetricNote>
         </SummarySection>
       </div>

@@ -99,6 +99,20 @@ const PAYLOADS: Record<string, unknown> = {
     recentCampaigns: [],
   },
   '/users': { items: [], total: 0, page: 1, pageSize: 5 },
+  '/rayern/blocks': {
+    blocks: {
+      funnel: null,
+      clientErrors: null,
+      endpointHealth: null,
+      dependencyConfig: null,
+      syntheticMonitoring: null,
+      productAdoption: null,
+      marketingConsent: null,
+      engagement: null,
+    },
+    syncedAt: null,
+    received: [],
+  },
 }
 
 /** Exactly the endpoints the current Overview registers with the navbar refresh. */
@@ -108,6 +122,7 @@ const SOURCE_PATHS = [
   '/errors',
   '/marketing/metrics',
   '/platform-metrics/overview',
+  '/rayern/blocks',
   '/system/overview',
   '/users',
   '/users/stats',
@@ -214,10 +229,10 @@ describe('manual refresh — Overview data view', () => {
     // The navbar failure panel — Overview also renders its own inline banner,
     // which is a different (also role=alert) element.
     const alert = await screen.findByTestId('refresh-failures')
-    // 8 of the 9 sources report failures through the query layer; revenue
+    // 9 of the 10 sources report failures through the query layer; revenue
     // reports its own failure as page state (RevenuePage's error panel), which
     // the navbar control correctly does not double-count.
-    expect(alert).toHaveTextContent('8 of 9 data sources failed to update')
+    expect(alert).toHaveTextContent('9 of 10 data sources failed to update')
     expect(alert).toHaveTextContent('HTTP 401 (UNAUTHENTICATED) — Authentication required')
     // No fabricated success time for a failed load.
     expect(screen.getByTestId('last-refresh')).toHaveTextContent('No successful update yet')
