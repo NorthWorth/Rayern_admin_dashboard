@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import type { NextFunction, Request, Response } from 'express'
 import { rateLimit } from '../auth'
+import { METRICS_EXEMPT_PATHS } from '../routes/metrics'
 
 /**
  * Rate-limit preservation checks for the manual-refresh work:
@@ -41,10 +42,14 @@ function makeRes(): FakeRes {
   return res
 }
 
-function call(middleware: (req: Request, res: Response, next: NextFunction) => void, ip: string) {
+function call(
+  middleware: (req: Request, res: Response, next: NextFunction) => void,
+  ip: string,
+  path = '/users',
+) {
   const res = makeRes()
   const next = vi.fn()
-  middleware({ ip } as Request, res as unknown as Response, next)
+  middleware({ ip, path } as Request, res as unknown as Response, next)
   return { res, next }
 }
 
@@ -94,6 +99,57 @@ describe('application rate limiter (unchanged rules)', () => {
     await new Promise((resolve) => setTimeout(resolve, 60))
 
     expect(call(middleware, '198.51.100.4').next).toHaveBeenCalled()
+  })
+})
+
+describe('metrics rate-limit exemption (contract §7)', () => {
+  test('the two metrics endpoints are exempt while every other path is counted', () => {
+    const middleware = rateLimit({
+      windowMs: 60_000,
+      max: 2,
+      key: 'unit-exempt',
+      exemptPaths: METRICS_EXEMPT_PATHS,
+    })
+    const ip = '198.51.100.9'
+
+    // Far more than `max` on the exempt paths — never a 429, and they never
+    // consume the shared bucket either.
+    for (let i = 0; i < 50; i++) {
+      expect(call(middleware, ip, '/api/v1/admin/metrics').res.statusCode).toBe(200)
+      const internal = call(middleware, ip, '/internal/dashboard-metrics')
+      expect(internal.next).toHaveBeenCalled()
+      expect(internal.res.statusCode).toBe(200)
+    }
+
+    // The bucket is still empty for this IP: an ordinary route gets its full
+    // budget before it is limited.
+    expect(call(middleware, ip, '/users').next).toHaveBeenCalled()
+    expect(call(middleware, ip, '/users').next).toHaveBeenCalled()
+    const limited = call(middleware, ip, '/users')
+    expect(limited.next).not.toHaveBeenCalled()
+    expect(limited.res.statusCode).toBe(429)
+
+    // Once the bucket is exhausted, exempt paths still pass.
+    expect(call(middleware, ip, '/api/v1/admin/metrics').res.statusCode).toBe(200)
+  })
+
+  test('a similarly-named path is NOT exempt', () => {
+    const middleware = rateLimit({
+      windowMs: 60_000,
+      max: 1,
+      key: 'unit-exempt-similar',
+      exemptPaths: METRICS_EXEMPT_PATHS,
+    })
+    const ip = '198.51.100.10'
+
+    expect(call(middleware, ip, '/api/v1/admin/metrics-extra').next).toHaveBeenCalled()
+    const second = call(middleware, ip, '/api/v1/admin/metrics-extra')
+    expect(second.next).not.toHaveBeenCalled()
+    expect(second.res.statusCode).toBe(429)
+  })
+
+  test('the exemption list is exactly the two documented paths', () => {
+    expect([...METRICS_EXEMPT_PATHS]).toEqual(['/api/v1/admin/metrics', '/internal/dashboard-metrics'])
   })
 })
 

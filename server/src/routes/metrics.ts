@@ -8,6 +8,18 @@ import type { AdminMetricAccounts, AdminMetricWorkspaces, AdminMetricBilling, Ad
 export const metricsRouter = Router()
 
 /**
+ * Exact paths exempt from the dashboard's global rate limiter (contract §7).
+ *
+ * Both metrics endpoints serve the same payload, are authenticated, and are
+ * polled by the dashboard UI and the pull-sync worker — so they must never be
+ * rate limited. The general limiter receives this list verbatim; comparison is
+ * exact (`req.path` has no query string), so a similarly-named path stays
+ * limited. Exemption covers rate limiting ONLY — `requireAuth`, `requireAdmin`
+ * and `requireMonitoringToken` remain fully enforced.
+ */
+export const METRICS_EXEMPT_PATHS = ['/api/v1/admin/metrics', '/internal/dashboard-metrics'] as const
+
+/**
  * GET /api/v1/admin/metrics
  *
  * Session-admin-only mirror of the internal dashboard-metrics handler.

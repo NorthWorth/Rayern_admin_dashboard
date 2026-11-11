@@ -37,7 +37,7 @@ import auditRoutes from './routes/audit'
 import marketingRoutes from './routes/marketing'
 import rayernAdminRoutes from './routes/rayernAdmin'
 import rayernInternalRoutes from './routes/rayernInternal'
-import { metricsRouter } from './routes/metrics'
+import { metricsRouter, METRICS_EXEMPT_PATHS } from './routes/metrics'
 import { startSyncWorker } from './rayernSync'
 import { initTelemetry, telemetryMiddleware } from './telemetry'
 
@@ -105,7 +105,10 @@ app.use(
 )
 
 app.use(express.json({ limit: '1mb' }))
-app.use(rateLimit({ windowMs: 60_000, max: 300, key: 'global' }))
+// Global 300/min/IP limiter. The metrics endpoints are exempt by exact path
+// (contract §7) so the dashboard can refresh them freely; every other route —
+// including similarly-named paths — stays limited.
+app.use(rateLimit({ windowMs: 60_000, max: 300, key: 'global', exemptPaths: METRICS_EXEMPT_PATHS }))
 
 /* --------------------------------- Routes --------------------------------- */
 
