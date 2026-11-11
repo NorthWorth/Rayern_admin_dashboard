@@ -661,3 +661,40 @@ export interface SyntheticResponse {
   synthetic: SyntheticMonitoringBlock
   meta: { source: string; requestId: string | null; fetchedAt: string; durable: boolean; note: string }
 }
+
+/**
+ * Outbound Rayern failure diagnostics, captured on the dashboard backend at the
+ * HTTP layer of the pull-sync and the internal proxies.
+ */
+export type SyncDiagnosticOutcome = 'http_error' | 'network_error' | 'timeout' | 'invalid_response'
+export type SyncDiagnosticSource = 'sync' | 'internal'
+
+export interface SyncDiagnostic {
+  id: string
+  occurredAt: string
+  source: SyncDiagnosticSource
+  /** Rayern pathname only — never a query string. */
+  endpoint: string
+  host: string
+  method: string
+  outcome: SyncDiagnosticOutcome
+  status: number | null
+  durationMs: number
+  errorCode: string | null
+  message: string
+  /** Sanitized excerpt, or null when no body was returned. */
+  responseBody: string | null
+  /** Allow-listed response headers (Retry-After, Server, X-*). */
+  headers: Record<string, string>
+  requestId: string | null
+}
+
+export interface SyncDiagnosticsResponse {
+  diagnostics: SyncDiagnostic[]
+  meta: {
+    maxEntries: number
+    retention: string
+    fetchedAt: string
+    note: string
+  }
+}

@@ -1,9 +1,10 @@
 /**
  * Rayern instrumentation routes (dashboard side, admin-only).
  *
- *   GET /rayern/blocks               — the 8 synced metric blocks (from pull-sync)
- *   GET /rayern/logs                 — server→server proxy to /internal/logs
- *   GET /rayern/synthetic-monitoring — server→server proxy to /internal/synthetic-monitoring
+ *   GET /rayern/blocks                — the 8 synced metric blocks (from pull-sync)
+ *   GET /rayern/logs                  — server→server proxy to /internal/logs
+ *   GET /rayern/synthetic-monitoring  — server→server proxy to /internal/synthetic-monitoring
+ *   GET /rayern/sync-diagnostics      — this backend's own failed outbound calls
  *
  * Security model:
  *  - Mounted behind `requireAdmin`; a browser session JWT is the only thing the
@@ -24,6 +25,13 @@ import { z } from 'zod'
 import { config, rayernInternalOrigin } from '../config'
 import { readInstrumentationBlocks, unwrapRayernEnvelope } from '../rayernSync'
 import { normalizeInstrumentation, normalizeSynthetic, type SyntheticMonitoringDto } from '../instrumentation'
+import {
+  classifyFetchError,
+  listSyncDiagnostics,
+  MAX_SYNC_DIAGNOSTICS,
+  recordSyncDiagnostic,
+  type SyncDiagnosticOutcome,
+} from '../syncDiagnostics'
 
 export const rayernInternalRouter = Router()
 
@@ -73,6 +81,7 @@ async function callRayernInternal(pathname: string, params: URLSearchParams): Pr
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), config.rayern.timeoutMs)
+  const startedAt = Date.now()
   // `Response` in this scope is Express's; fetch's response is named explicitly.
   let res: Awaited<ReturnType<typeof fetch>>
   try {
@@ -86,26 +95,63 @@ async function callRayernInternal(pathname: string, params: URLSearchParams): Pr
       signal: controller.signal,
     })
   } catch (err) {
-    const aborted = err instanceof Error && err.name === 'AbortError'
+    const info = classifyFetchError(err, config.rayern.timeoutMs)
+    await recordInternalFailure(pathname, {
+      outcome: info.outcome,
+      status: null,
+      durationMs: Date.now() - startedAt,
+      code: info.code,
+      message: info.message,
+    })
     return {
       ok: false,
       status: 504,
-      code: aborted ? 'RAYERN_TIMEOUT' : 'RAYERN_UNREACHABLE',
-      message: aborted
-        ? `Rayern did not respond within ${config.rayern.timeoutMs}ms.`
-        : 'Could not reach the Rayern API.',
+      code: info.code,
+      message:
+        info.outcome === 'timeout'
+          ? `Rayern did not respond within ${config.rayern.timeoutMs}ms.`
+          : 'Could not reach the Rayern API.',
       requestId: null,
     }
   } finally {
     clearTimeout(timer)
   }
 
+  const durationMs = Date.now() - startedAt
   const requestId = res.headers.get('x-request-id')
+  // Read the body as text first: an error response still has a body worth
+  // recording (sanitized) even when it is not JSON.
+  let bodyText: string | null = null
   let body: unknown = null
   try {
-    body = await res.json()
+    bodyText = await res.text()
+    body = bodyText ? JSON.parse(bodyText) : null
   } catch {
     body = null
+  }
+
+  if (!res.ok) {
+    await recordInternalFailure(pathname, {
+      outcome: 'http_error',
+      status: res.status,
+      durationMs,
+      code: res.status === 429 ? 'RAYERN_RATE_LIMITED' : `UPSTREAM_${res.status}`,
+      message: `Rayern responded with HTTP ${res.status} ${res.statusText || ''}`.trim(),
+      responseBody: bodyText,
+      responseHeaders: res.headers,
+      requestId,
+    })
+  } else if (body === null) {
+    await recordInternalFailure(pathname, {
+      outcome: 'invalid_response',
+      status: res.status,
+      durationMs,
+      code: 'UPSTREAM_INVALID_JSON',
+      message: 'Rayern returned a body that could not be parsed as JSON.',
+      responseBody: bodyText,
+      responseHeaders: res.headers,
+      requestId,
+    })
   }
 
   if (!res.ok) {
@@ -139,9 +185,58 @@ async function callRayernInternal(pathname: string, params: URLSearchParams): Pr
 
   const unwrapped = unwrapRayernEnvelope(body)
   if (!unwrapped.ok) {
+    await recordInternalFailure(pathname, {
+      outcome: 'invalid_response',
+      status: res.status,
+      durationMs,
+      code: 'RAYERN_REPORTED_FAILURE',
+      message: unwrapped.error,
+      responseHeaders: res.headers,
+      requestId,
+    })
     return { ok: false, status: 502, code: 'RAYERN_REPORTED_FAILURE', message: unwrapped.error, requestId }
   }
   return { ok: true, value: unwrapped.value, requestId }
+}
+
+/**
+ * Records one failed on-demand internal call (logs / synthetic monitoring).
+ * Same guarantees as the pull-sync recorder: best-effort, sanitized, bounded,
+ * and it never alters the response the route returns.
+ */
+async function recordInternalFailure(
+  pathname: string,
+  input: {
+    outcome: SyncDiagnosticOutcome
+    status: number | null
+    durationMs: number
+    code: string
+    message: string
+    responseBody?: string | null
+    responseHeaders?: Headers | null
+    requestId?: string | null
+  },
+): Promise<void> {
+  let host = 'rayern'
+  try {
+    host = new URL(rayernInternalOrigin()).host
+  } catch {
+    // Keep the placeholder — never guess a host.
+  }
+  await recordSyncDiagnostic({
+    source: 'internal',
+    endpoint: pathname,
+    host,
+    method: 'GET',
+    outcome: input.outcome,
+    status: input.status,
+    durationMs: input.durationMs,
+    errorCode: input.code,
+    message: input.message,
+    responseBody: input.responseBody ?? null,
+    responseHeaders: input.responseHeaders ?? null,
+    requestId: input.requestId ?? null,
+  })
 }
 
 /** Reads Rayern's `{ success:false, error:{ code, message } }` envelope, if present. */
@@ -336,6 +431,52 @@ rayernInternalRouter.get('/synthetic-monitoring', async (_req: Request, res: Res
         fetchedAt: new Date().toISOString(),
         durable: false,
         note: 'Produced by an external scheduler running scripts/synthetic-monitor.mjs. The dashboard only displays results.',
+      },
+    })
+  } catch (err) {
+    next(err)
+  }
+})
+
+/* ----------------------- GET /sync-diagnostics ---------------------------- */
+
+const DiagnosticsQuery = z.object({
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_SYNC_DIAGNOSTICS)
+    .default(50),
+})
+
+/**
+ * This backend's own failed outbound Rayern calls.
+ *
+ * These are captured at the HTTP layer of the pull-sync and the internal
+ * proxies, so they describe attempts that never reached (or were rejected by)
+ * Rayern — information the browser-side error surfaces cannot show. Records are
+ * already sanitized before storage; nothing credential-shaped is returned.
+ */
+rayernInternalRouter.get('/sync-diagnostics', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const parsed = DiagnosticsQuery.safeParse(req.query)
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        error: { code: 'INVALID_QUERY', message: 'limit must be an integer between 1 and 200.' },
+      })
+      return
+    }
+
+    const { diagnostics, maxEntries } = await listSyncDiagnostics(parsed.data.limit)
+    res.json({
+      diagnostics,
+      meta: {
+        maxEntries,
+        retention: 'newest-first bounded store; older failures are discarded',
+        fetchedAt: new Date().toISOString(),
+        /** Server-to-server only: the monitoring token is never included. */
+        note: 'Captured on the dashboard backend for outbound Rayern requests. Never contains credentials or request headers.',
       },
     })
   } catch (err) {

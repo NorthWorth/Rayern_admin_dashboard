@@ -1,5 +1,10 @@
 import { apiRequest, buildQuery, USE_DEMO_DATA } from '../lib/api'
-import type { InstrumentationResponse, RayernLogsResponse, SyntheticResponse } from '../lib/types'
+import type {
+  InstrumentationResponse,
+  RayernLogsResponse,
+  SyncDiagnosticsResponse,
+  SyntheticResponse,
+} from '../lib/types'
 
 /**
  * Rayern instrumentation service.
@@ -10,6 +15,7 @@ import type { InstrumentationResponse, RayernLogsResponse, SyntheticResponse } f
  *   GET /rayern/blocks               the 8 metric blocks persisted by the pull-sync
  *   GET /rayern/logs                 server→server /internal/logs
  *   GET /rayern/synthetic-monitoring server→server /internal/synthetic-monitoring
+ *   GET /rayern/sync-diagnostics     this backend's failed outbound Rayern calls
  *
  * Demo mode (no API configured) reports every block as absent rather than
  * inventing sample analytics: the pages then render their honest "not available"
@@ -75,6 +81,16 @@ export interface LogQuery {
   since?: string
 }
 
+const DEMO_DIAGNOSTICS: SyncDiagnosticsResponse = {
+  diagnostics: [],
+  meta: {
+    maxEntries: 200,
+    retention: 'newest-first bounded store; older failures are discarded',
+    fetchedAt: new Date().toISOString(),
+    note: 'Captured on the dashboard backend for outbound Rayern requests. Never contains credentials or request headers.',
+  },
+}
+
 export const rayernService = {
   blocks(): Promise<InstrumentationResponse> {
     if (USE_DEMO_DATA) return delay(NO_BLOCKS)
@@ -95,5 +111,14 @@ export const rayernService = {
   syntheticMonitoring(): Promise<SyntheticResponse> {
     if (USE_DEMO_DATA) return delay(DEMO_SYNTHETIC)
     return apiRequest<SyntheticResponse>('/rayern/synthetic-monitoring')
+  },
+
+  /**
+   * Failures this backend hit while calling Rayern (pull-sync and internal
+   * proxies). Records are sanitized server-side; no token ever crosses here.
+   */
+  syncDiagnostics(limit = 50): Promise<SyncDiagnosticsResponse> {
+    if (USE_DEMO_DATA) return delay(DEMO_DIAGNOSTICS)
+    return apiRequest<SyncDiagnosticsResponse>(`/rayern/sync-diagnostics${buildQuery({ limit })}`)
   },
 }

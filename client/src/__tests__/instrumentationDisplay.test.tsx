@@ -21,6 +21,7 @@ vi.mock('../services/rayern', () => ({
     blocks: vi.fn(),
     logs: vi.fn(),
     syntheticMonitoring: vi.fn(),
+    syncDiagnostics: vi.fn(),
   },
 }))
 
@@ -39,7 +40,7 @@ import { SystemPage } from '../pages/System'
 import { EmailsPage } from '../pages/Emails'
 import { RefreshProvider } from '../hooks/usePageRefresh'
 import { ToastProvider } from '../components/ui/Toast'
-import type { InstrumentationResponse, SyntheticResponse } from '../lib/types'
+import type { InstrumentationResponse, SyncDiagnosticsResponse, SyntheticResponse } from '../lib/types'
 
 const NO_BLOCKS: InstrumentationResponse = {
   blocks: {
@@ -104,6 +105,15 @@ beforeEach(() => {
     daily: [],
   } as never)
   vi.mocked(rayernService.blocks).mockResolvedValue(NO_BLOCKS)
+  vi.mocked(rayernService.syncDiagnostics).mockResolvedValue({
+    diagnostics: [],
+    meta: {
+      maxEntries: 200,
+      retention: 'newest-first bounded store; older failures are discarded',
+      fetchedAt: '2026-10-28T06:00:00.000Z',
+      note: 'Captured on the dashboard backend for outbound Rayern requests.',
+    },
+  } as SyncDiagnosticsResponse)
   vi.mocked(rayernService.syntheticMonitoring).mockResolvedValue({
     synthetic: {
       available: false,
@@ -282,5 +292,74 @@ describe('Emails — marketing consent (Rayern)', () => {
 
     await waitFor(() => expect(screen.getByText('Marketing consent not reported')).toBeInTheDocument())
     expect(screen.queryByText('Opted in')).not.toBeInTheDocument()
+  })
+})
+
+describe('System — server-side Rayern sync diagnostics', () => {
+  const FAILURE = {
+    id: 'd1',
+    occurredAt: '2026-10-28T05:59:00.000Z',
+    source: 'sync' as const,
+    endpoint: '/internal/dashboard-metrics',
+    host: 'api.rayern.test',
+    method: 'GET',
+    outcome: 'http_error' as const,
+    status: 500,
+    durationMs: 412,
+    errorCode: 'UPSTREAM_500',
+    message: 'Rayern responded with HTTP 500 Internal Server Error',
+    responseBody: '{"error":{"message":"aggregation failed for [redacted-email]"}}',
+    headers: { 'retry-after': '30', server: 'rayern-edge', 'x-request-id': 'req_diag_500' },
+    requestId: 'req_diag_500',
+  }
+
+  test('renders the failure details captured at the outbound HTTP layer', async () => {
+    vi.mocked(rayernService.syncDiagnostics).mockResolvedValue({
+      diagnostics: [FAILURE],
+      meta: {
+        maxEntries: 200,
+        retention: 'newest-first bounded store; older failures are discarded',
+        fetchedAt: '2026-10-28T06:00:00.000Z',
+        note: 'Captured on the dashboard backend for outbound Rayern requests.',
+      },
+    })
+
+    renderPage(<SystemPage />)
+
+    await waitFor(() => expect(screen.getByText('Rayern sync diagnostics')).toBeInTheDocument())
+
+    expect(screen.getByText('HTTP error')).toBeInTheDocument()
+
+    const row = screen.getByText('GET /internal/dashboard-metrics').closest('li')
+    expect(row).not.toBeNull()
+    expect(row).toHaveTextContent('HTTP 500')
+    expect(row).toHaveTextContent('412ms')
+    expect(row).toHaveTextContent('api.rayern.test')
+    expect(row).toHaveTextContent('UPSTREAM_500')
+    expect(row).toHaveTextContent('Rayern responded with HTTP 500')
+    expect(row).toHaveTextContent('pull-sync')
+
+    // Sanitized body and diagnostic headers are shown verbatim…
+    expect(row).toHaveTextContent(/aggregation failed for \[redacted-email\]/)
+    expect(row).toHaveTextContent('retry-after: 30')
+    expect(row).toHaveTextContent('server: rayern-edge')
+    // …with the correlation id copyable.
+    expect(screen.getByLabelText('Copy request id req_diag_500')).toBeInTheDocument()
+  })
+
+  test('distinguishes "nothing failed" from "diagnostics unavailable"', async () => {
+    renderPage(<SystemPage />)
+
+    await waitFor(() => expect(screen.getByText('No failed Rayern requests recorded')).toBeInTheDocument())
+    expect(screen.getByText(/Only failures are stored/)).toBeInTheDocument()
+  })
+
+  test('surfaces a diagnostics request failure instead of an empty list', async () => {
+    vi.mocked(rayernService.syncDiagnostics).mockRejectedValue(new Error('diagnostics store unavailable'))
+
+    renderPage(<SystemPage />)
+
+    await waitFor(() => expect(screen.getByText(/diagnostics store unavailable/)).toBeInTheDocument())
+    expect(screen.queryByText('No failed Rayern requests recorded')).not.toBeInTheDocument()
   })
 })

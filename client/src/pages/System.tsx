@@ -1,18 +1,31 @@
 import { Card, CardBody, CardHeader } from '../components/ui/Card'
 import { KpiCard } from '../components/KpiCard'
 import { StatusBadge } from '../components/ui/Badge'
-import { LoadingBlock, ErrorState } from '../components/ui/states'
+import { EmptyState, LoadingBlock, ErrorState } from '../components/ui/states'
 import { UnavailablePanel } from '../components/UnavailablePanel'
+import { RequestIdChip } from '../components/RequestIdChip'
 import { VolumeBarChart } from '../components/charts'
 import { systemService } from '../services/system'
 import { rayernService } from '../services/rayern'
 import { useQuery } from '../hooks/useQuery'
 import { usePageRefresh } from '../hooks/usePageRefresh'
-import { clsx, formatCompact, formatNumber, formatPct, rayernReasonText, timeAgo, titleCase } from '../lib/utils'
+import {
+  clsx,
+  formatCompact,
+  formatDateTime,
+  formatDuration,
+  formatNumber,
+  formatPct,
+  rayernReasonText,
+  timeAgo,
+  titleCase,
+} from '../lib/utils'
 import type {
   DependencyConfigBlock,
   HealthStatus,
   RayernSyncStatus,
+  SyncDiagnostic,
+  SyncDiagnosticsResponse,
   SyntheticMonitoringBlock,
 } from '../lib/types'
 
@@ -26,7 +39,10 @@ export function SystemPage() {
   // proxied by the dashboard backend (the browser never calls Rayern).
   const blocksQ = useQuery(() => rayernService.blocks())
   const syntheticQ = useQuery(() => rayernService.syntheticMonitoring())
-  usePageRefresh([q, blocksQ, syntheticQ])
+  // Failures this backend hit while calling Rayern — captured at the outbound
+  // HTTP layer, which is the only place a server-to-server failure is visible.
+  const diagnosticsQ = useQuery(() => rayernService.syncDiagnostics(50))
+  usePageRefresh([q, blocksQ, syntheticQ, diagnosticsQ])
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6">
@@ -59,6 +75,13 @@ export function SystemPage() {
           onRetry={syntheticQ.refetch}
         />
       </div>
+
+      <SyncDiagnosticsCard
+        data={diagnosticsQ.data ?? null}
+        loading={diagnosticsQ.loading}
+        error={diagnosticsQ.error}
+        onRetry={diagnosticsQ.refetch}
+      />
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <Card className="xl:col-span-2">
@@ -338,6 +361,129 @@ function SyntheticCard({
               {note ?? 'Results come from an external scheduler running the probe script — the dashboard only displays what it recorded.'}{' '}
               Until that scheduler is configured and verified, these checks are not continuous monitoring, and no historical
               uptime percentage is claimed.
+            </p>
+          </>
+        )}
+      </CardBody>
+    </Card>
+  )
+}
+
+/** Tone/label for an outbound failure class. Colour never carries the meaning alone. */
+function diagnosticTone(outcome: SyncDiagnostic['outcome']): 'red' | 'amber' | 'neutral' {
+  if (outcome === 'http_error') return 'red'
+  if (outcome === 'timeout' || outcome === 'network_error') return 'amber'
+  return 'neutral'
+}
+
+function diagnosticLabel(outcome: SyncDiagnostic['outcome']): string {
+  switch (outcome) {
+    case 'http_error':
+      return 'HTTP error'
+    case 'network_error':
+      return 'Network error'
+    case 'timeout':
+      return 'Timeout'
+    default:
+      return 'Invalid response'
+  }
+}
+
+/**
+ * Server-side Rayern sync diagnostics.
+ *
+ * These records come from the outbound HTTP call itself, so they show what the
+ * browser cannot: the upstream status, the response excerpt, `Retry-After` /
+ * `Server` / `X-*` headers and the correlation id of a failed pull. They are
+ * sanitized before storage — no token, cookie or authorization header.
+ */
+function SyncDiagnosticsCard({
+  data,
+  loading,
+  error,
+  onRetry,
+}: {
+  data: SyncDiagnosticsResponse | null
+  loading: boolean
+  error: string | null
+  onRetry: () => void
+}) {
+  const diagnostics = data?.diagnostics ?? []
+
+  return (
+    <Card>
+      <CardHeader
+        title="Rayern sync diagnostics"
+        subtitle="Failed outbound requests captured on the dashboard backend — the attempts a browser-side error can never show"
+        actions={
+          data ? (
+            <span className="whitespace-nowrap text-xs text-ink-500">
+              newest {diagnostics.length} of {data.meta.maxEntries} retained
+            </span>
+          ) : null
+        }
+      />
+      <CardBody>
+        {loading ? (
+          <LoadingBlock rows={4} />
+        ) : error ? (
+          <ErrorState message={error} onRetry={onRetry} />
+        ) : !data ? (
+          <p className="text-sm text-ink-500">Sync diagnostics are not available.</p>
+        ) : diagnostics.length === 0 ? (
+          <EmptyState
+            title="No failed Rayern requests recorded"
+            description="Nothing has failed since this diagnostic store was last cleared. Only failures are stored — successful pulls are not logged here."
+          />
+        ) : (
+          <>
+            <ul className="divide-y divide-ink-100">
+              {diagnostics.map((d) => (
+                <li key={d.id} className="py-3 first:pt-0 last:pb-0">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                    <StatusBadge tone={diagnosticTone(d.outcome)}>{diagnosticLabel(d.outcome)}</StatusBadge>
+                    <span className="font-mono text-xs font-medium text-ink-800">
+                      {d.method} {d.endpoint}
+                    </span>
+                    <span className="text-xs text-ink-500">
+                      {d.status !== null ? `HTTP ${d.status}` : 'no response'} · {formatDuration(d.durationMs)} · {d.host}
+                    </span>
+                    <span className="ml-auto whitespace-nowrap text-xs text-ink-500" title={formatDateTime(d.occurredAt)}>
+                      {timeAgo(d.occurredAt)}
+                    </span>
+                  </div>
+
+                  <p className="mt-1 text-xs leading-relaxed text-ink-700">
+                    <span className="font-mono text-[11px] text-ink-500">{d.errorCode ?? 'ERROR'}</span> · {d.message}
+                  </p>
+
+                  {d.responseBody ? (
+                    <pre className="mt-1.5 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded border border-ink-200 bg-ink-50 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-ink-700">
+                      {d.responseBody}
+                    </pre>
+                  ) : null}
+
+                  {(Object.keys(d.headers).length > 0 || d.requestId) ? (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                      {Object.entries(d.headers).map(([name, value]) => (
+                        <span
+                          key={name}
+                          className="rounded border border-ink-200 bg-white px-1.5 py-0.5 font-mono text-[11px] text-ink-600"
+                        >
+                          {name}: {value}
+                        </span>
+                      ))}
+                      {d.requestId ? <RequestIdChip value={d.requestId} /> : null}
+                      <span className="text-[11px] uppercase tracking-wide text-ink-400">{[d.source === 'sync' ? 'pull-sync' : 'internal proxy']}</span>
+                    </div>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+            <p className="mt-3 text-xs leading-relaxed text-ink-500">
+              These are outbound attempts against Rayern, not browser API failures. Bodies and headers are sanitized
+              server-side before storage, the monitoring token and authorization headers are never recorded, and only the
+              newest {data.meta.maxEntries} failures are kept.
             </p>
           </>
         )}

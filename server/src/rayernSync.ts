@@ -2,6 +2,12 @@ import { z } from 'zod'
 import { SpanKind } from '@opentelemetry/api'
 import { recordAudit } from './audit'
 import { withSpan } from './telemetry'
+import {
+  classifyFetchError,
+  readBodyExcerpt,
+  recordSyncDiagnostic,
+  type SyncDiagnosticOutcome,
+} from './syncDiagnostics'
 
 /**
  * Approved aggregate contract for the Rayern pull-sync.
@@ -593,6 +599,41 @@ function syncEndpointPath(): string {
   }
 }
 
+/**
+ * Records one failed outbound attempt against the configured sync endpoint.
+ *
+ * Best-effort by design: the recorder swallows storage errors, so diagnostics
+ * can never change sync behaviour (no extra throw, no extra retry, no altered
+ * last-known-good data). The monitoring token and request headers are never
+ * passed in — only the endpoint path/host, HTTP metadata and a bounded,
+ * sanitized body excerpt.
+ */
+async function recordOutboundFailure(input: {
+  outcome: SyncDiagnosticOutcome
+  status: number | null
+  durationMs: number
+  errorCode: string
+  message: string
+  responseBody?: string | null
+  responseHeaders?: Headers | null
+  requestId?: string | null
+}): Promise<void> {
+  await recordSyncDiagnostic({
+    source: 'sync',
+    endpoint: syncEndpointPath(),
+    host: syncEndpointHost(),
+    method: 'GET',
+    outcome: input.outcome,
+    status: input.status,
+    durationMs: input.durationMs,
+    errorCode: input.errorCode,
+    message: input.message,
+    responseBody: input.responseBody ?? null,
+    responseHeaders: input.responseHeaders ?? null,
+    requestId: input.requestId ?? null,
+  })
+}
+
 /** One pull cycle. Safe to call concurrently — overlap is prevented. */
 export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promise<SyncResult> {
   if (!rayernSyncEnabled()) return { ok: false, skipped: 'disabled' }
@@ -620,6 +661,7 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
     // Timeout guard: never let a hanging Rayern hang the worker.
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), config.rayern.timeoutMs)
+    const fetchStartedAt = Date.now()
     let res: Response
     try {
       // External HTTP CLIENT span, parented to the rayern.sync span. Only the
@@ -653,6 +695,19 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
             signal: controller.signal,
           }),
       )
+    } catch (fetchErr) {
+      // Network failure or timeout: the request never produced a response. The
+      // original error is rethrown unchanged so failure handling below (and the
+      // worker's backoff) behave exactly as before.
+      const info = classifyFetchError(fetchErr, config.rayern.timeoutMs)
+      await recordOutboundFailure({
+        outcome: info.outcome,
+        status: null,
+        durationMs: Date.now() - fetchStartedAt,
+        errorCode: info.code,
+        message: info.message,
+      })
+      throw fetchErr
     } finally {
       clearTimeout(timer)
     }
@@ -661,6 +716,22 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
     lastHttpStatus = res.status
 
     if (!res.ok) {
+      // Capture what Rayern actually said before the body is discarded: the
+      // status, a bounded sanitized excerpt, and the headers that explain the
+      // failure (Retry-After, Server, X-*) plus the correlation id.
+      const bodyExcerpt = await readBodyExcerpt(res)
+      const upstreamRequestId = res.headers.get('x-request-id')
+      await recordOutboundFailure({
+        outcome: 'http_error',
+        status: res.status,
+        durationMs: attemptDurationMs ?? Date.now() - pullStartedAt,
+        errorCode: res.status === 429 ? 'RAYERN_RATE_LIMITED' : `UPSTREAM_${res.status}`,
+        message: `Rayern responded with HTTP ${res.status} ${res.statusText || ''}`.trim(),
+        responseBody: bodyExcerpt,
+        responseHeaders: res.headers,
+        requestId: upstreamRequestId,
+      })
+
       if (res.status === 429) {
         const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'))
         if (retryAfterSec !== null) {
@@ -674,7 +745,22 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
       throw httpError(res.status)
     }
 
-    const raw: unknown = await res.json()
+    let raw: unknown
+    try {
+      raw = await res.json()
+    } catch {
+      // A 2xx with an unreadable body is a failed measurement, not an empty one.
+      await recordOutboundFailure({
+        outcome: 'invalid_response',
+        status: res.status,
+        durationMs: attemptDurationMs ?? Date.now() - pullStartedAt,
+        errorCode: 'UPSTREAM_INVALID_JSON',
+        message: 'Rayern returned a body that could not be parsed as JSON.',
+        responseHeaders: res.headers,
+        requestId: res.headers.get('x-request-id'),
+      })
+      throw new Error('Rayern sync response was not valid JSON; nothing was stored')
+    }
 
     // Structural diagnostics before validation: shape flags only, never values.
     console.log(`[dashboard-sync] Rayern metrics shape: ${describeSyncShape(raw)}`)
@@ -683,6 +769,15 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
     // A declared failure (success=false) aborts the cycle without storing.
     const unwrapped = unwrapRayernEnvelope(raw)
     if (!unwrapped.ok) {
+      await recordOutboundFailure({
+        outcome: 'invalid_response',
+        status: res.status,
+        durationMs: attemptDurationMs ?? Date.now() - pullStartedAt,
+        errorCode: 'UPSTREAM_REPORTED_FAILURE',
+        message: unwrapped.error,
+        responseHeaders: res.headers,
+        requestId: res.headers.get('x-request-id'),
+      })
       throw new Error(unwrapped.error)
     }
 
@@ -697,6 +792,16 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
       console.log(
         `[dashboard-sync] validation failed: issues=${parsed.error.issues.length} paths=${paths.join(',')} shape=${describeSyncShape(raw)}`,
       )
+      await recordOutboundFailure({
+        outcome: 'invalid_response',
+        status: res.status,
+        durationMs: attemptDurationMs ?? Date.now() - pullStartedAt,
+        errorCode: 'UPSTREAM_SCHEMA_REJECTED',
+        // Our own field paths only — never payload values.
+        message: `Payload failed validation (${parsed.error.issues.length} issue(s); paths: ${paths.join(',') || 'root'})`,
+        responseHeaders: res.headers,
+        requestId: res.headers.get('x-request-id'),
+      })
       throw new Error(
         `Rayern sync payload failed validation (${parsed.error.issues.length} issue(s), paths: ${paths.join(',')}); nothing was stored`,
       )

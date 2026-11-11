@@ -4,6 +4,7 @@ import { Badge, StatusBadge } from '../components/ui/Badge'
 import { EmptyState, ErrorState, LoadingBlock } from '../components/ui/states'
 import { UnavailablePanel, MetricNote } from '../components/UnavailablePanel'
 import { Select } from '../components/ui/Input'
+import { RequestIdChip } from '../components/RequestIdChip'
 import { TrendLineChart } from '../components/charts'
 import { observabilityService } from '../services/observability'
 import { rayernService } from '../services/rayern'
@@ -37,34 +38,6 @@ function levelTone(level: string | null): 'neutral' | 'amber' | 'red' {
 function sinceIso(range: '24h' | '7d' | 'all'): string | undefined {
   const days = range === '24h' ? 1 : range === '7d' ? 7 : 0
   return days === 0 ? undefined : new Date(Date.now() - days * 86_400_000).toISOString()
-}
-
-/** Copies a request id so an operator can correlate it with Rayern's own logs. */
-function RequestIdChip({ value }: { value: string }) {
-  const [copied, setCopied] = useState(false)
-  return (
-    <button
-      type="button"
-      aria-label={`Copy request id ${value}`}
-      onClick={() => {
-        if (!navigator.clipboard?.writeText) return
-        void navigator.clipboard
-          .writeText(value)
-          .then(() => {
-            setCopied(true)
-            window.setTimeout(() => setCopied(false), 1500)
-          })
-          .catch(() => undefined)
-      }}
-      className="inline-flex items-center gap-1.5 rounded border border-ink-200 bg-ink-50 px-1.5 py-0.5 font-mono text-[11px] text-ink-700 hover:border-ink-300 hover:bg-ink-100"
-      title="Copy request id"
-    >
-      {value.slice(0, 12)}…
-      <span className="font-sans text-[10px] font-semibold uppercase tracking-wide text-ink-500">
-        {copied ? 'copied' : 'copy'}
-      </span>
-    </button>
-  )
 }
 
 export function ObservabilityPage() {
