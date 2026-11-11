@@ -456,11 +456,18 @@ export async function initDb(): Promise<void> {
       error_code    TEXT,
       message       TEXT NOT NULL DEFAULT '',
       response_body TEXT,
-      headers       JSONB NOT NULL DEFAULT '{}',
-      request_id    TEXT
+      headers            JSONB NOT NULL DEFAULT '{}',
+      request_id         TEXT,
+      final_url          TEXT,
+      request_started_at TIMESTAMPTZ,
+      reached_application BOOLEAN
     )
   `)
   await query(`CREATE INDEX IF NOT EXISTS idx_rayern_sync_diagnostics_time ON rayern_sync_diagnostics (occurred_at DESC)`)
+  // Backfill columns for databases created before this instrumentation.
+  await query(`ALTER TABLE rayern_sync_diagnostics ADD COLUMN IF NOT EXISTS final_url TEXT`)
+  await query(`ALTER TABLE rayern_sync_diagnostics ADD COLUMN IF NOT EXISTS request_started_at TIMESTAMPTZ`)
+  await query(`ALTER TABLE rayern_sync_diagnostics ADD COLUMN IF NOT EXISTS reached_application BOOLEAN`)
 
   // Sync observability: duration + last HTTP status of the most recent pull.
   await query(`ALTER TABLE sync_status ADD COLUMN IF NOT EXISTS last_duration_ms INTEGER`)

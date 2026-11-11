@@ -615,8 +615,11 @@ async function recordOutboundFailure(input: {
   errorCode: string
   message: string
   responseBody?: string | null
+  responseBodyLimit?: number
   responseHeaders?: Headers | null
   requestId?: string | null
+  startedAt?: number | null
+  finalUrl?: string | null
 }): Promise<void> {
   await recordSyncDiagnostic({
     source: 'sync',
@@ -629,8 +632,11 @@ async function recordOutboundFailure(input: {
     errorCode: input.errorCode,
     message: input.message,
     responseBody: input.responseBody ?? null,
+    responseBodyLimit: input.responseBodyLimit,
     responseHeaders: input.responseHeaders ?? null,
     requestId: input.requestId ?? null,
+    startedAt: input.startedAt ?? null,
+    finalUrl: input.finalUrl ?? null,
   })
 }
 
@@ -706,6 +712,8 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
         durationMs: Date.now() - fetchStartedAt,
         errorCode: info.code,
         message: info.message,
+        startedAt: fetchStartedAt,
+        finalUrl: null,
       })
       throw fetchErr
     } finally {
@@ -719,7 +727,8 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
       // Capture what Rayern actually said before the body is discarded: the
       // status, a bounded sanitized excerpt, and the headers that explain the
       // failure (Retry-After, Server, X-*) plus the correlation id.
-      const bodyExcerpt = await readBodyExcerpt(res)
+      const bodyLimit = res.status === 429 ? 50_000 : undefined
+      const bodyExcerpt = await readBodyExcerpt(res, bodyLimit)
       const upstreamRequestId = res.headers.get('x-request-id')
       await recordOutboundFailure({
         outcome: 'http_error',
@@ -728,8 +737,11 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
         errorCode: res.status === 429 ? 'RAYERN_RATE_LIMITED' : `UPSTREAM_${res.status}`,
         message: `Rayern responded with HTTP ${res.status} ${res.statusText || ''}`.trim(),
         responseBody: bodyExcerpt,
+        responseBodyLimit: bodyLimit,
         responseHeaders: res.headers,
         requestId: upstreamRequestId,
+        startedAt: fetchStartedAt,
+        finalUrl: res.url,
       })
 
       if (res.status === 429) {
@@ -758,6 +770,8 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
         message: 'Rayern returned a body that could not be parsed as JSON.',
         responseHeaders: res.headers,
         requestId: res.headers.get('x-request-id'),
+        startedAt: fetchStartedAt,
+        finalUrl: res.url,
       })
       throw new Error('Rayern sync response was not valid JSON; nothing was stored')
     }
@@ -777,6 +791,8 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
         message: unwrapped.error,
         responseHeaders: res.headers,
         requestId: res.headers.get('x-request-id'),
+        startedAt: fetchStartedAt,
+        finalUrl: res.url,
       })
       throw new Error(unwrapped.error)
     }
@@ -801,6 +817,8 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
         message: `Payload failed validation (${parsed.error.issues.length} issue(s); paths: ${paths.join(',') || 'root'})`,
         responseHeaders: res.headers,
         requestId: res.headers.get('x-request-id'),
+        startedAt: fetchStartedAt,
+        finalUrl: res.url,
       })
       throw new Error(
         `Rayern sync payload failed validation (${parsed.error.issues.length} issue(s), paths: ${paths.join(',')}); nothing was stored`,

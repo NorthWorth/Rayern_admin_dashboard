@@ -103,6 +103,8 @@ async function callRayernInternal(pathname: string, params: URLSearchParams): Pr
       durationMs: Date.now() - startedAt,
       code: info.code,
       message: info.message,
+      startedAt,
+      finalUrl: null,
     })
     return {
       ok: false,
@@ -131,6 +133,7 @@ async function callRayernInternal(pathname: string, params: URLSearchParams): Pr
     body = null
   }
 
+  const bodyLimit = res.status === 429 ? 50_000 : undefined
   if (!res.ok) {
     await recordInternalFailure(pathname, {
       outcome: 'http_error',
@@ -139,8 +142,11 @@ async function callRayernInternal(pathname: string, params: URLSearchParams): Pr
       code: res.status === 429 ? 'RAYERN_RATE_LIMITED' : `UPSTREAM_${res.status}`,
       message: `Rayern responded with HTTP ${res.status} ${res.statusText || ''}`.trim(),
       responseBody: bodyText,
+      responseBodyLimit: bodyLimit,
       responseHeaders: res.headers,
       requestId,
+      startedAt,
+      finalUrl: res.url,
     })
   } else if (body === null) {
     await recordInternalFailure(pathname, {
@@ -152,6 +158,8 @@ async function callRayernInternal(pathname: string, params: URLSearchParams): Pr
       responseBody: bodyText,
       responseHeaders: res.headers,
       requestId,
+      startedAt,
+      finalUrl: res.url,
     })
   }
 
@@ -200,6 +208,8 @@ async function callRayernInternal(pathname: string, params: URLSearchParams): Pr
       message: unwrapped.error,
       responseHeaders: res.headers,
       requestId,
+      startedAt,
+      finalUrl: res.url,
     })
     return { ok: false, status: 502, code: 'RAYERN_REPORTED_FAILURE', message: unwrapped.error, requestId }
   }
@@ -220,8 +230,11 @@ async function recordInternalFailure(
     code: string
     message: string
     responseBody?: string | null
+    responseBodyLimit?: number
     responseHeaders?: Headers | null
     requestId?: string | null
+    startedAt?: number | null
+    finalUrl?: string | null
   },
 ): Promise<void> {
   let host = 'rayern'
@@ -241,8 +254,11 @@ async function recordInternalFailure(
     errorCode: input.code,
     message: input.message,
     responseBody: input.responseBody ?? null,
+    responseBodyLimit: input.responseBodyLimit,
     responseHeaders: input.responseHeaders ?? null,
     requestId: input.requestId ?? null,
+    startedAt: input.startedAt ?? null,
+    finalUrl: input.finalUrl ?? null,
   })
 }
 

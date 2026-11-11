@@ -672,6 +672,7 @@ export type SyncDiagnosticSource = 'sync' | 'internal'
 export interface SyncDiagnostic {
   id: string
   occurredAt: string
+  startedAt: string | null
   source: SyncDiagnosticSource
   /** Rayern pathname only — never a query string. */
   endpoint: string
@@ -684,9 +685,11 @@ export interface SyncDiagnostic {
   message: string
   /** Sanitized excerpt, or null when no body was returned. */
   responseBody: string | null
-  /** Allow-listed response headers (Retry-After, Server, X-*). */
+  finalUrl: string | null
+  /** All non-sensitive response headers captured from the upstream. */
   headers: Record<string, string>
   requestId: string | null
+  reachedApplication: boolean | null
 }
 
 export interface SyncDiagnosticsResponse {
