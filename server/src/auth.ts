@@ -96,9 +96,26 @@ interface Bucket {
 
 const buckets = new Map<string, Bucket>()
 
-/** In-memory fixed-window rate limiter, keyed by IP + route group. */
-export function rateLimit(opts: { windowMs: number; max: number; key?: string }) {
+/**
+ * In-memory fixed-window rate limiter, keyed by IP + route group.
+ *
+ * `exemptPaths` holds EXACT paths that never touch the bucket (contract §7: the
+ * two metrics endpoints are polled freely). Express strips the query string
+ * from `req.path`, so `/api/v1/admin/metrics?x=1` is exempt while a
+ * similarly-named path such as `/api/v1/admin/metrics-extra` is not.
+ */
+export function rateLimit(opts: {
+  windowMs: number
+  max: number
+  key?: string
+  exemptPaths?: readonly string[]
+}) {
+  const exempt = new Set(opts.exemptPaths ?? [])
   return (req: Request, res: Response, next: NextFunction): void => {
+    if (exempt.has(req.path)) {
+      next()
+      return
+    }
     const key = `${opts.key ?? 'global'}:${req.ip ?? 'unknown'}`
     const now = Date.now()
     const bucket = buckets.get(key)

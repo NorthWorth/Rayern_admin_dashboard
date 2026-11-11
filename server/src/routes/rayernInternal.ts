@@ -30,6 +30,7 @@ import {
   listSyncDiagnostics,
   MAX_SYNC_DIAGNOSTICS,
   recordSyncDiagnostic,
+  sanitizeDiagnosticText,
   type SyncDiagnosticOutcome,
 } from '../syncDiagnostics'
 
@@ -155,7 +156,13 @@ async function callRayernInternal(pathname: string, params: URLSearchParams): Pr
   }
 
   if (!res.ok) {
-    const upstreamMessage = readUpstreamErrorMessage(body) ?? 'Rayern rejected the request.'
+    // Rayern's own error text is upstream data: it can echo a payload value,
+    // an address or a credential pair. Sanitize and bound it before it is
+    // stored (already sanitized) or handed to the browser.
+    const upstreamMessage = sanitizeDiagnosticText(
+      readUpstreamErrorMessage(body) ?? 'Rayern rejected the request.',
+      300,
+    )
 
     // A Rayern rate limit is forwarded as a 429 with its Retry-After intact so
     // the dashboard can say when a retry is reasonable — clearly labelled as

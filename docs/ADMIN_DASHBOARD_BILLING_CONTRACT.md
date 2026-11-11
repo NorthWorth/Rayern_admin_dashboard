@@ -352,7 +352,25 @@ collection.
 
 ## 7. Rate-limit behavior (metrics exemption proof)
 
-Application-controlled limiters (all in this repo):
+Two separate limiter families exist, and they must not be confused:
+
+- **Rayern's app limiters** (the table below — they live in the Rayern
+  repository, on `/api`, and apply to Rayern's own HTTP surface).
+- **The dashboard's inbound global limiter** (`server/src/auth.ts`
+  `rateLimit`, mounted once in `server/src/index.ts`): **300 requests / minute
+  / IP**, with an exact-path exemption list
+  (`METRICS_EXEMPT_PATHS` in `server/src/routes/metrics.ts`) covering
+  `GET /api/v1/admin/metrics` and `GET /internal/dashboard-metrics`.
+
+Both dashboard metrics endpoints were documented as exempt but the global
+limiter originally counted them (the doc described a `generalLimiter.skip`
+that did not exist in this repo). The exemption is now implemented in
+`rateLimit({ exemptPaths })`: comparison is against `req.path`, which has no
+query string, so `/api/v1/admin/metrics?x=1` is exempt while
+`/api/v1/admin/metrics-extra` is **not** — and previously-exempt traffic never
+consumes the shared 300/min bucket.
+
+Rayern's application-controlled limiters:
 
 | Limiter | Mounted on | Limit | Exclusions |
 |---|---|---|---|
@@ -364,21 +382,21 @@ Application-controlled limiters (all in this repo):
 | `publicReviewLimiter` | public review routes | 120 / 15 min | — |
 | `campaignSendLimiter` | `/api/v1/admin/campaigns/send` | 10 / 15 min | — |
 
-Exempt endpoints: `GET /api/v1/admin/metrics` (exact-path skip in
-`generalLimiter.skip`; query strings stripped before comparison so
-similarly-named paths are NOT exempt) and `GET /internal/dashboard-metrics`
-(mounted outside `/api`, never crosses any limiter). Exemption covers rate
-limiting ONLY — `requireAuth`/`requireAdmin`/`requireMonitoringToken` remain
-fully enforced.
+Dashboard-side exempt endpoints: `GET /api/v1/admin/metrics` and
+`GET /internal/dashboard-metrics` (exact paths in the global limiter's
+`exemptPaths`; query strings are stripped by Express before comparison, so
+similarly-named paths are NOT exempt). Exemption covers rate limiting ONLY —
+`requireAuth`/`requireAdmin`/`requireMonitoringToken` remain fully enforced.
 
 Regression proof: `server/src/scripts/admin-dashboard-smoke.mjs`
-(`npm run test:admin-dashboard`) runs the real middleware stack and asserts:
-210 admin requests to `/api/v1/admin/metrics` → 0 × 429; 210 requests to
-`/internal/dashboard-metrics` → 0 × 429; unauthenticated metrics → 401;
-non-admin metrics → 403; same client IP exhausting `/api/v1/admin/users`
-→ 429 (other endpoints stay limited); `/api/v1/admin/metrics-extra` → 404
-and still counted; campaign send → 429 past its budget; credential/session
-limits covered by the pre-existing suites.
+(`npm run test:admin-dashboard` in `server/`) boots the real API against a mock
+Rayern and asserts, among 61 checks: 210 authenticated requests to
+`/api/v1/admin/metrics` → 0 × 429; 210 requests to `/internal/dashboard-metrics`
+→ 0 × 429; the same under a query string; `/api/v1/admin/metrics-extra` → 404
+and still counted; the same client IP exhausting `GET /users` → first 429 exactly
+at the remaining 300/min budget (proving exempt traffic consumed nothing); and
+both metrics endpoints still answering 200 after the shared bucket is exhausted.
+Unit-level equivalents live in `server/src/__tests__/rateLimit.test.ts`.
 
 **Infrastructure limits are separate**: Cloudflare/Render may apply their
 own per-IP limits outside this repository. No repo-level change removes
