@@ -540,8 +540,11 @@ function SyncStatusCard({
               {titleCase(sync.status)}
             </StatusBadge>
             <span className="text-ink-600">
-              Last successful pull:{' '}
-              <span className="font-medium text-ink-800">{sync.lastSuccessAt ? timeAgo(sync.lastSuccessAt) : 'never'}</span>
+              Last successful sync:{' '}
+              <span className="font-medium text-ink-800">
+                {sync.lastSuccessAt ? timeAgo(sync.lastSuccessAt) : 'never'}
+                {sync.lastSuccessTransport && <> · transport: {sync.lastSuccessTransport}</>}
+              </span>
             </span>
             <span className="text-ink-600">
               Last attempt: <span className="font-medium text-ink-800">{sync.lastAttemptAt ? timeAgo(sync.lastAttemptAt) : 'never'}</span>

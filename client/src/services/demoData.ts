@@ -294,6 +294,7 @@ export function buildSystemOverview(): SystemOverview {
       enabled: true,
       status: 'healthy' as const,
       lastSuccessAt: minutesAgo(4),
+      lastSuccessTransport: 'pull',
       lastAttemptAt: minutesAgo(4),
       lastFailureAt: daysAgo(2),
       lastError: null,

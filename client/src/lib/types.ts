@@ -178,12 +178,16 @@ export interface SystemOverview {
 }
 
 /**
- * Health of the dashboard-side Rayern pull-sync worker (spec section 12).
+ * Transport of the last successful sync attempt ('pull' = dashboard outbound
+ * pull from Rayern; 'push' = Rayern pushing a snapshot to the dashboard).
+ * A newer successful attempt supersedes an older one, whichever transport it
+ * came on.
  */
 export interface RayernSyncStatus {
   enabled: boolean
   status: HealthStatus
   lastSuccessAt: string | null
+  lastSuccessTransport: 'pull' | 'push' | null
   lastAttemptAt: string | null
   lastFailureAt: string | null
   lastError: string | null

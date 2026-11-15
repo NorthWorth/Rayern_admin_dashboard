@@ -9,6 +9,7 @@ import { useToast } from './ui/Toast'
 import { useQuery } from '../hooks/useQuery'
 import { campaignsService } from '../services/campaigns'
 import { audienceService } from '../services/audience'
+import { rayernService } from '../services/rayern'
 import { emailsService } from '../services/emails'
 import { DEFAULT_FROM } from '../lib/api'
 import {
@@ -25,6 +26,7 @@ import {
   type RayernPlan,
   type SubscriptionStatus,
 } from '../lib/types'
+import type { RayernSyncStatus } from '../lib/types'
 
 /**
  * Email category. The category decides WHICH users may be selected and HOW the
@@ -124,6 +126,7 @@ export function CampaignComposer({
   const users = filteredSynced
   const pagination = null
 
+  // Rayern-side audience sync status (present on the System page). Kept local;
   useEffect(() => {
     if (mode === 'manual' && users.length > 0 && selected.length === 0) {
       const eligible = users
