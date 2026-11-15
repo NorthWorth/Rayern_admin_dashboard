@@ -322,7 +322,7 @@ export async function initDb(): Promise<void> {
       service          TEXT NOT NULL,
       kind             TEXT NOT NULL,
       status           TEXT NOT NULL DEFAULT 'healthy' CHECK (status IN ('healthy','degraded','failing')),
-      uptime_pct_30d   NUMERIC NOT NULL DEFAULT 100,
+      uptime_pct_30d   NUMERIC,
       latency_p50      NUMERIC NOT NULL DEFAULT 0,
       latency_p95      NUMERIC NOT NULL DEFAULT 0,
       last_incident_at TIMESTAMPTZ,
@@ -464,6 +464,10 @@ export async function initDb(): Promise<void> {
     )
   `)
   await query(`CREATE INDEX IF NOT EXISTS idx_rayern_sync_diagnostics_time ON rayern_sync_diagnostics (occurred_at DESC)`)
+  // Allow nullable uptime for service_health (unavailable uptime must stay NULL, not 0).
+  await query(`ALTER TABLE service_health ALTER COLUMN uptime_pct_30d DROP NOT NULL`)
+  await query(`ALTER TABLE service_health ALTER COLUMN uptime_pct_30d DROP DEFAULT`)
+
   // Backfill columns for databases created before this instrumentation.
   await query(`ALTER TABLE rayern_sync_diagnostics ADD COLUMN IF NOT EXISTS final_url TEXT`)
   await query(`ALTER TABLE rayern_sync_diagnostics ADD COLUMN IF NOT EXISTS request_started_at TIMESTAMPTZ`)

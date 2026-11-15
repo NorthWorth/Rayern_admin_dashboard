@@ -26,11 +26,6 @@ const untrackedNum = z.preprocess(
   z.number().min(0),
 )
 
-const untrackedPct = z.preprocess(
-  (v) => (v === null || v === undefined ? 100 : v),
-  z.number().min(0).max(100),
-)
-
 const untrackedList = <S extends z.ZodTypeAny>(inner: S, max: number) =>
   z.preprocess(
     (v) => (v === null || v === undefined ? [] : v),
@@ -116,7 +111,10 @@ export const SyncPayload = z.object({
         service: z.string().min(1).max(100),
         kind: z.enum(['api', 'database', 'cache', 'queue', 'email', 'storage']),
         status: z.enum(['healthy', 'degraded', 'failing']),
-        uptimePct30d: untrackedPct.nullable(),
+        uptimePct30d: z.preprocess(
+          (v) => (v === undefined ? null : v),
+          z.number().min(0).max(100).nullable(),
+        ),
         latencyMsP50: untrackedNum.nullable(),
         latencyMsP95: untrackedNum.nullable(),
         lastIncidentAt: z.string().datetime().nullable().default(null),

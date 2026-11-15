@@ -232,8 +232,13 @@ async function start(): Promise<void> {
   // Dashboard-side background worker that pulls approved aggregates from the
   // Rayern API. Rayern never pushes, never waits, and never depends on us.
   if (isDbReady()) {
-    if (config.rayern.wakeupEndpoint) startWakeupWorker()
-    else if (config.rayern.pullFallbackEnabled || rayernSyncEnabled()) startSyncWorker()
+    if (config.rayern.wakeupEndpoint) {
+      console.log('[dashboard-sync] wake/push scheduler selected (RAYERN_WAKEUP_ENDPOINT configured)')
+      startWakeupWorker()
+    } else {
+      console.log('[dashboard-sync] RAYERN_WAKEUP_ENDPOINT not configured — using legacy pull-sync fallback')
+      if (config.rayern.pullFallbackEnabled || rayernSyncEnabled()) startSyncWorker()
+    }
   }
 }
 
