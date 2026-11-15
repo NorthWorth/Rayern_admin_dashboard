@@ -19,7 +19,7 @@ import helmet from 'helmet'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import bcrypt from 'bcryptjs'
-import { config } from './config'
+import { config, rayernSyncEnabled } from './config'
 import { SERVER_VERSION } from './version'
 import { initDb, pool, isDbReady, setDbReady, startEmbeddedDbIfConfigured } from './db'
 import { authenticate, requireAdmin, rateLimit } from './auth'
@@ -37,8 +37,9 @@ import auditRoutes from './routes/audit'
 import marketingRoutes from './routes/marketing'
 import rayernAdminRoutes from './routes/rayernAdmin'
 import rayernInternalRoutes from './routes/rayernInternal'
+import rayernPushRoutes from './routes/rayernPush'
 import { metricsRouter, METRICS_EXEMPT_PATHS } from './routes/metrics'
-import { startSyncWorker } from './rayernSync'
+import { startSyncWorker, startWakeupWorker } from './rayernSync'
 import { initTelemetry, telemetryMiddleware } from './telemetry'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -108,7 +109,7 @@ app.use(express.json({ limit: '1mb' }))
 // Global 300/min/IP limiter. The metrics endpoints are exempt by exact path
 // (contract §7) so the dashboard can refresh them freely; every other route —
 // including similarly-named paths — stays limited.
-app.use(rateLimit({ windowMs: 60_000, max: 300, key: 'global', exemptPaths: METRICS_EXEMPT_PATHS }))
+app.use(rateLimit({ windowMs: 60_000, max: 300, key: 'global', exemptPaths: [...METRICS_EXEMPT_PATHS, '/internal/dashboard/rayern-snapshot'] }))
 
 /* --------------------------------- Routes --------------------------------- */
 
@@ -134,6 +135,7 @@ app.use('/auth', authRoutes)
 //   GET /internal/dashboard-metrics   → requireMonitoringToken (service token)
 // Both are mounted at root; the session route embeds its full contract path.
 app.use(metricsRouter)
+app.use(rayernPushRoutes)
 
 // Rayern admin API proxy (contract §4/§5) — verbatim pass-through, server-side
 // credentials only. Consent revalidation happens on Rayern's side.
@@ -229,7 +231,15 @@ async function start(): Promise<void> {
 
   // Dashboard-side background worker that pulls approved aggregates from the
   // Rayern API. Rayern never pushes, never waits, and never depends on us.
-  if (isDbReady()) startSyncWorker()
+  if (isDbReady()) {
+    if (config.rayern.wakeupEndpoint) {
+      console.log('[dashboard-sync] wake/push scheduler selected (RAYERN_WAKEUP_ENDPOINT configured)')
+      startWakeupWorker()
+    } else {
+      console.log('[dashboard-sync] RAYERN_WAKEUP_ENDPOINT not configured — using legacy pull-sync fallback')
+      if (config.rayern.pullFallbackEnabled || rayernSyncEnabled()) startSyncWorker()
+    }
+  }
 }
 
 void start()

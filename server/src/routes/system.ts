@@ -189,7 +189,7 @@ router.get('/overview', async (_req, res, next) => {
             : 'Rayern synchronization is not configured',
         dataSource: 'rayern-sync',
         reportedStatus: status === 'unknown' ? rayernReported : null,
-        uptimePct30d: Number(r.uptime_pct_30d),
+        uptimePct30d: r.uptime_pct_30d === null ? null : Number(r.uptime_pct_30d),
         latencyMsP50: Number(r.latency_p50),
         latencyMsP95: Number(r.latency_p95),
         lastIncidentAt: r.last_incident_at ? r.last_incident_at.toISOString() : null,

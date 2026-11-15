@@ -322,7 +322,7 @@ export async function initDb(): Promise<void> {
       service          TEXT NOT NULL,
       kind             TEXT NOT NULL,
       status           TEXT NOT NULL DEFAULT 'healthy' CHECK (status IN ('healthy','degraded','failing')),
-      uptime_pct_30d   NUMERIC NOT NULL DEFAULT 100,
+      uptime_pct_30d   NUMERIC,
       latency_p50      NUMERIC NOT NULL DEFAULT 0,
       latency_p95      NUMERIC NOT NULL DEFAULT 0,
       last_incident_at TIMESTAMPTZ,
@@ -464,6 +464,10 @@ export async function initDb(): Promise<void> {
     )
   `)
   await query(`CREATE INDEX IF NOT EXISTS idx_rayern_sync_diagnostics_time ON rayern_sync_diagnostics (occurred_at DESC)`)
+  // Allow nullable uptime for service_health (unavailable uptime must stay NULL, not 0).
+  await query(`ALTER TABLE service_health ALTER COLUMN uptime_pct_30d DROP NOT NULL`)
+  await query(`ALTER TABLE service_health ALTER COLUMN uptime_pct_30d DROP DEFAULT`)
+
   // Backfill columns for databases created before this instrumentation.
   await query(`ALTER TABLE rayern_sync_diagnostics ADD COLUMN IF NOT EXISTS final_url TEXT`)
   await query(`ALTER TABLE rayern_sync_diagnostics ADD COLUMN IF NOT EXISTS request_started_at TIMESTAMPTZ`)
@@ -491,4 +495,35 @@ export async function initDb(): Promise<void> {
   `, [rayernSyncEnabled()])
   await query(`CREATE INDEX IF NOT EXISTS idx_trace_spans_start ON trace_spans (start_time)`)
   await query(`CREATE INDEX IF NOT EXISTS idx_span_metrics_time ON span_metrics (time)`)
+
+  // Rayern push ingestion: durable snapshot deliveries and ingestion status.
+  await query(`
+    CREATE TABLE IF NOT EXISTS rayern_snapshots (
+      snapshot_id   TEXT PRIMARY KEY,
+      received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+      payload       JSONB NOT NULL,
+      status        TEXT NOT NULL DEFAULT 'success' CHECK (status IN ('success','failed')),
+      error         TEXT,
+      generated_at  TEXT
+    )
+  `)
+  await query(`CREATE INDEX IF NOT EXISTS idx_rayern_snapshots_received ON rayern_snapshots (received_at DESC)`)
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS rayern_ingestion_status (
+      id                    INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+      last_snapshot_id      TEXT,
+      last_received_at      TIMESTAMPTZ,
+      last_success_at       TIMESTAMPTZ,
+      last_failure_at       TIMESTAMPTZ,
+      last_error            TEXT,
+      consecutive_failures  INTEGER NOT NULL DEFAULT 0,
+      enabled               BOOLEAN NOT NULL DEFAULT false,
+      updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `)
+  await query(`
+    INSERT INTO rayern_ingestion_status (id, enabled) VALUES (1, true)
+    ON CONFLICT (id) DO NOTHING
+  `)
 }
