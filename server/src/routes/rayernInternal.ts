@@ -24,6 +24,7 @@ import { Router, type Request, type Response, type NextFunction } from 'express'
 import { z } from 'zod'
 import { config, rayernInternalOrigin } from '../config'
 import { readInstrumentationBlocks, unwrapRayernEnvelope } from '../rayernSync'
+import { getIngestionStatus } from '../rayernIngestion'
 import { normalizeInstrumentation, normalizeSynthetic, type SyntheticMonitoringDto } from '../instrumentation'
 import {
   classifyFetchError,
@@ -502,6 +503,17 @@ rayernInternalRouter.get('/sync-diagnostics', async (req: Request, res: Response
         note: 'Captured on the dashboard backend for outbound Rayern requests. Never contains credentials or request headers.',
       },
     })
+  } catch (err) {
+    next(err)
+  }
+})
+
+/* ----------------------- GET /snapshot-status ---------------------------- */
+
+rayernInternalRouter.get('/snapshot-status', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    const status = await getIngestionStatus()
+    res.json({ snapshotStatus: status, fetchedAt: new Date().toISOString() })
   } catch (err) {
     next(err)
   }

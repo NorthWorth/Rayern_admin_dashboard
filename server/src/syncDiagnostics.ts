@@ -48,7 +48,7 @@ export type SyncDiagnosticOutcome =
   | 'invalid_response'
 
 /** Which outbound call produced the record. */
-export type SyncDiagnosticSource = 'sync' | 'internal'
+export type SyncDiagnosticSource = 'sync' | 'internal' | 'trigger' | 'ingestion'
 
 export interface SyncDiagnosticInput {
   source: SyncDiagnosticSource

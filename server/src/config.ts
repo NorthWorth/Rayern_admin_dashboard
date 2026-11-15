@@ -122,6 +122,19 @@ export const config = {
      * (NaN in setInterval would hammer Rayern ~every millisecond).
      */
     intervalMs: envFiniteNumber('RAYERN_SYNC_INTERVAL_MS', 1_800_000, 30_000, 86_400_000),
+    /**
+     * Wake-up trigger endpoint on Rayern. When set, the dashboard sends a
+     * lightweight authenticated request here instead of pulling the full
+     * payload on a short interval. Rayern then generates and pushes its
+     * snapshot to the dashboard ingestion endpoint.
+     */
+    wakeupEndpoint: trimmed('RAYERN_WAKEUP_ENDPOINT') || trimmed('RAYERN_TRIGGER_ENDPOINT'),
+    /** Interval for the wake-up trigger (ms). Default 1h, clamped to 1-2h. */
+    wakeupIntervalMs: envFiniteNumber('RAYERN_WAKEUP_INTERVAL_MS', 3_600_000, 1_800_000, 7_200_000),
+    /** Per-trigger timeout (ms). Long enough to survive a Render Free cold start. */
+    triggerTimeoutMs: Math.max(10_000, Number(process.env.RAYERN_TRIGGER_TIMEOUT_MS ?? '90000')),
+    /** Opt-in legacy pull sync (temporary fallback). */
+    pullFallbackEnabled: envBool('RAYERN_PULL_FALLBACK_ENABLED', false),
   },
   billing: {
     currency: (process.env.PAYSTACK_CURRENCY ?? 'USD').toUpperCase(),

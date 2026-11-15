@@ -932,6 +932,107 @@ export function startSyncWorker(): void {
   setInterval(() => void tracedSync('scheduled'), config.rayern.intervalMs).unref()
 }
 
+let triggerRunning = false
+let triggerRateLimitedUntil = 0
+
+function syncEndpointHostForTrigger(): string {
+  try { return new URL(config.rayern.wakeupEndpoint).host } catch { return 'rayern' }
+}
+function syncEndpointPathForTrigger(): string {
+  try { return new URL(config.rayern.wakeupEndpoint).pathname } catch { return '/internal/dashboard-wakeup' }
+}
+
+export async function triggerRayernWake(trigger: 'boot' | 'scheduled' | 'manual'): Promise<SyncResult> {
+  if (!config.rayern.wakeupEndpoint) return { ok: false, skipped: 'disabled' }
+  if (triggerRunning) return { ok: false, skipped: 'already-running' }
+  if (Date.now() < triggerRateLimitedUntil) {
+    const waitSec = Math.ceil((triggerRateLimitedUntil - Date.now()) / 1000)
+    console.log(`[dashboard-sync] skipping wake trigger: rate-limit window still active (${waitSec}s left)`)
+    return { ok: false, skipped: 'rate-limited' }
+  }
+
+  triggerRunning = true
+  const startedAt = Date.now()
+  try {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), config.rayern.triggerTimeoutMs)
+    let res: Response
+    try {
+      res = await fetch(config.rayern.wakeupEndpoint, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          ...(config.rayern.monitoringToken ? { Authorization: `Bearer ${config.rayern.monitoringToken}` } : {}),
+        },
+        signal: controller.signal,
+      })
+    } catch (fetchErr) {
+      clearTimeout(timer)
+      const info = classifyFetchError(fetchErr, config.rayern.triggerTimeoutMs)
+      await recordSyncDiagnostic({
+        source: 'trigger',
+        endpoint: syncEndpointPathForTrigger(),
+        host: syncEndpointHostForTrigger(),
+        method: 'POST',
+        outcome: info.outcome,
+        status: null,
+        durationMs: Date.now() - startedAt,
+        errorCode: info.code,
+        message: info.message,
+        startedAt,
+        finalUrl: null,
+      })
+      throw fetchErr
+    } finally {
+      clearTimeout(timer)
+    }
+
+    const durationMs = Date.now() - startedAt
+    if (!res.ok) {
+      const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'))
+      if (res.status === 429 && retryAfterSec !== null) {
+        triggerRateLimitedUntil = Math.max(triggerRateLimitedUntil, Date.now() + Math.min(retryAfterSec, 3_600_000) * 1000)
+      }
+      await recordSyncDiagnostic({
+        source: 'trigger',
+        endpoint: syncEndpointPathForTrigger(),
+        host: syncEndpointHostForTrigger(),
+        method: 'POST',
+        outcome: 'http_error',
+        status: res.status,
+        durationMs,
+        errorCode: res.status === 429 ? 'RAYERN_RATE_LIMITED' : `UPSTREAM_${res.status}`,
+        message: `Rayern wake trigger responded with HTTP ${res.status} ${res.statusText || ''}`.trim(),
+        responseHeaders: res.headers,
+        requestId: res.headers.get('x-request-id'),
+        startedAt,
+        finalUrl: res.url,
+      })
+      if (res.status === 429) throw httpError(429, ' (rate limited)')
+      throw httpError(res.status)
+    }
+
+    console.log(`[dashboard-sync] wake trigger sent (${trigger}) — Rayern will push its snapshot`)
+    return { ok: true }
+  } catch (err) {
+    const message = err instanceof Error ? (err.name === 'AbortError' ? `Rayern wake trigger timed out after ${config.rayern.triggerTimeoutMs}ms` : err.message) : 'Unknown trigger error'
+    console.error(`[dashboard-sync] ${trigger} wake trigger failed: ${message}`)
+    return { ok: false, error: message }
+  } finally {
+    triggerRunning = false
+  }
+}
+
+export function startWakeupWorker(): void {
+  if (!config.rayern.wakeupEndpoint) {
+    console.log('[dashboard-sync] RAYERN_WAKEUP_ENDPOINT not configured — wake/push disabled')
+    return
+  }
+  console.log(`[dashboard-sync] wake/push enabled → POST ${config.rayern.wakeupEndpoint} every ${formatIntervalMs(config.rayern.wakeupIntervalMs)}`)
+  setTimeout(() => void triggerRayernWake('boot'), 10_000).unref()
+  setInterval(() => void triggerRayernWake('scheduled'), config.rayern.wakeupIntervalMs).unref()
+}
+
 /**
  * Shape returned by the /system overview for the sync-status card.
  * Includes full operational sync observability: duration, last HTTP status,

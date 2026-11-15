@@ -491,4 +491,35 @@ export async function initDb(): Promise<void> {
   `, [rayernSyncEnabled()])
   await query(`CREATE INDEX IF NOT EXISTS idx_trace_spans_start ON trace_spans (start_time)`)
   await query(`CREATE INDEX IF NOT EXISTS idx_span_metrics_time ON span_metrics (time)`)
+
+  // Rayern push ingestion: durable snapshot deliveries and ingestion status.
+  await query(`
+    CREATE TABLE IF NOT EXISTS rayern_snapshots (
+      snapshot_id   TEXT PRIMARY KEY,
+      received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+      payload       JSONB NOT NULL,
+      status        TEXT NOT NULL DEFAULT 'success' CHECK (status IN ('success','failed')),
+      error         TEXT,
+      generated_at  TEXT
+    )
+  `)
+  await query(`CREATE INDEX IF NOT EXISTS idx_rayern_snapshots_received ON rayern_snapshots (received_at DESC)`)
+
+  await query(`
+    CREATE TABLE IF NOT EXISTS rayern_ingestion_status (
+      id                    INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+      last_snapshot_id      TEXT,
+      last_received_at      TIMESTAMPTZ,
+      last_success_at       TIMESTAMPTZ,
+      last_failure_at       TIMESTAMPTZ,
+      last_error            TEXT,
+      consecutive_failures  INTEGER NOT NULL DEFAULT 0,
+      enabled               BOOLEAN NOT NULL DEFAULT false,
+      updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `)
+  await query(`
+    INSERT INTO rayern_ingestion_status (id, enabled) VALUES (1, true)
+    ON CONFLICT (id) DO NOTHING
+  `)
 }
