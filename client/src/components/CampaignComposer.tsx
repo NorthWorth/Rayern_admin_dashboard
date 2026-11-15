@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Card, CardBody, CardHeader } from './ui/Card'
 import { Button } from './ui/Button'
 import { Modal } from './ui/Modal'
@@ -8,6 +8,7 @@ import { EmptyState, ErrorState, LoadingBlock } from './ui/states'
 import { useToast } from './ui/Toast'
 import { useQuery } from '../hooks/useQuery'
 import { campaignsService } from '../services/campaigns'
+import { audienceService } from '../services/audience'
 import { emailsService } from '../services/emails'
 import { DEFAULT_FROM } from '../lib/api'
 import {
@@ -91,8 +92,6 @@ export function CampaignComposer({
   const [idempotencyKey] = useState(newIdempotencyKey)
 
   const promotional = category === 'promotional'
-  // Promotional sends are consent-gated: the picker can only ever show and
-  // select accounts that already opted in (Rayern re-checks at send time).
   const consentFilter: ConsentFilter | 'all' = promotional ? 'opted_in' : consent
 
   const filters: AdminUserFilters = useMemo(
@@ -106,12 +105,33 @@ export function CampaignComposer({
     [page, plan, subscriptionStatus, consentFilter],
   )
 
-  const usersQ = useQuery<AdminUsersPage | null>(
-    () => (open ? campaignsService.listUsers(filters) : Promise.resolve(null)),
-    [open, page, plan, subscriptionStatus, consentFilter],
+  const audienceQ = useQuery<import('../services/audience').SyncedAudienceResponse | null>(
+    () => (open ? audienceService.list() : Promise.resolve(null)),
+    [open],
   )
-  const users = usersQ.data?.users ?? []
-  const pagination = usersQ.data?.pagination ?? null
+  const allSynced = audienceQ.data?.items ?? []
+  const syncedUsers: AdminUserRecord[] = allSynced.map((r) => audienceService.toAdminUserRecord(r))
+  const filteredSynced = syncedUsers.filter((u) => {
+    const planVal = (u.subscription?.plan ?? 'starter') as RayernPlan
+    const statusVal = (u.subscription?.status ?? 'none') as SubscriptionStatus
+    const opted = consentOf(u)
+    if (plan !== 'all' && planVal !== plan) return false
+    if (subscriptionStatus !== 'all' && statusVal !== subscriptionStatus) return false
+    if (consentFilter === 'opted_in' && !opted) return false
+    if (consentFilter === 'opted_out' && opted) return false
+    return true
+  })
+  const users = filteredSynced
+  const pagination = null
+
+  useEffect(() => {
+    if (mode === 'manual' && users.length > 0 && selected.length === 0) {
+      const eligible = users
+        .filter((u) => !promotional || (consentOf(u) && (u.accountStatus ?? 'active') === 'active'))
+        .map((u) => u.email)
+      setSelected(eligible)
+    }
+  }, [mode, users.length])
 
   const audience: CampaignAudience | null = useMemo(() => {
     if (!promotional) {
@@ -178,8 +198,6 @@ export function CampaignComposer({
     setSendError(null)
     try {
       if (promotional) {
-        // Promotional campaign → Rayern's campaign backend, which revalidates
-        // consent server-side and reports every skipped recipient.
         const response = await campaignsService.send({
           subject: subject.trim(),
           bodyHtml: message,
@@ -193,8 +211,6 @@ export function CampaignComposer({
         )
         onSent?.()
       } else {
-        // Non-promotional service notice → the dashboard's existing individual
-        // recipient pipeline (BCC-only expansion; nobody sees anybody else).
         await emailsService.send({
           from: DEFAULT_FROM,
           to: [],
@@ -236,7 +252,6 @@ export function CampaignComposer({
           </Select>
         </Field>
 
-        {/* --------------------------- Recipients --------------------------- */}
         <Card>
           <CardHeader
             title="Recipients"
@@ -337,10 +352,10 @@ export function CampaignComposer({
               </Field>
             </div>
 
-            {usersQ.loading ? (
+            {audienceQ.loading ? (
               <LoadingBlock rows={4} />
-            ) : usersQ.error ? (
-              <ErrorState message={usersQ.error} onRetry={() => usersQ.refetch()} />
+            ) : audienceQ.error ? (
+              <ErrorState message={audienceQ.error} onRetry={() => audienceQ.refetch()} />
             ) : users.length === 0 ? (
               <EmptyState
                 title="No matching users"
@@ -404,11 +419,13 @@ export function CampaignComposer({
               </div>
             )}
 
+            <div className="rounded-md border border-ink-200 bg-ink-50/60 px-3 py-2 text-xs text-ink-600">
+              <span className="font-semibold text-ink-800">Counts:</span>{' '}
+              total synchronised {allSynced.length} · eligible (consent + active) {allSynced.filter((r) => r.consentOptedIn && r.status === 'active' && r.emailVerified).length} · selected {selected.length} · excluded {allSynced.length - selected.length}
+            </div>
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-ink-500">
               <span>
-                {pagination
-                  ? `${pagination.totalResults} matching user(s) · page ${pagination.page} of ${pagination.totalPages}`
-                  : ''}
+                {users.length} matching user(s) · {allSynced.length} total synchronised
                 {selected.length > 0 ? ` · ${selected.length} selected` : ''}
               </span>
               <span className="flex items-center gap-2">
@@ -418,7 +435,7 @@ export function CampaignComposer({
                 <Button
                   variant="ghost"
                   size="sm"
-                  disabled={pagination === null || page >= pagination.totalPages}
+                  disabled={true}
                   onClick={() => setPage((p) => p + 1)}
                 >
                   Next
@@ -428,7 +445,6 @@ export function CampaignComposer({
           </CardBody>
         </Card>
 
-        {/* ---------------------------- Audience ---------------------------- */}
         <Card>
           <CardHeader
             title="Audience preview"
@@ -519,7 +535,6 @@ export function CampaignComposer({
           </CardBody>
         </Card>
 
-        {/* ----------------------------- Message ---------------------------- */}
         <Field label="Subject" hint={promotional ? 'Sent by Rayern’s campaign backend' : 'Sent through the dashboard email pipeline'}>
           <Input value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="Subject" />
         </Field>
