@@ -1,300 +1,42 @@
 /**
  * Rayern instrumentation routes (dashboard side, admin-only).
  *
- *   GET /rayern/blocks                — the 8 synced metric blocks (from pull-sync)
- *   GET /rayern/logs                  — server→server proxy to /internal/logs
- *   GET /rayern/synthetic-monitoring  — server→server proxy to /internal/synthetic-monitoring
+ *   GET /rayern/blocks                — the 8 synced metric blocks (from pull-sync / snapshot ingestion)
+ *   GET /rayern/logs                  — cached log entries from the local database (no outbound Rayern call)
+ *   GET /rayern/synthetic-monitoring  — locally stored synthetic block from the last snapshot (no outbound Rayern call)
  *   GET /rayern/sync-diagnostics      — this backend's own failed outbound calls
+ *   GET /rayern/snapshot-status       — snapshot ingestion status
  *
  * Security model:
  *  - Mounted behind `requireAdmin`; a browser session JWT is the only thing the
  *    browser presents.
- *  - The Rayern monitoring token never leaves this process: it is attached to
- *    the outbound request and is never echoed, logged or serialized.
- *  - There is no wildcard proxy. Each upstream path is a hard-coded literal, so
- *    this cannot be used to reach arbitrary Rayern internals.
- *  - Query parameters are validated and bounded before they are forwarded, and
- *    responses are rebuilt from an allow-list of fields rather than passed
+ *  - Ordinary dashboard refresh/read paths must not initiate outbound Rayern
+ *    requests. Logs and synthetic monitoring are served from locally persisted
+ *    data populated by snapshot ingestion or scheduled background refresh.
+ *  - The Rayern monitoring token never leaves this process and is never echoed,
+ *    logged or serialized.
+ *  - There is no wildcard proxy. Any outbound path used by scheduled/background
+ *    refresh is a hard-coded literal.
+ *  - Responses are rebuilt from an allow-list of fields rather than passed
  *    through wholesale.
- *  - Neither logs nor check results are persisted here: both upstream stores are
- *    small and short-lived (500 entries / 7 days; 30 history samples), so they
- *    are fetched on demand instead of being duplicated into the database.
  */
 import { Router, type Request, type Response, type NextFunction } from 'express'
 import { z } from 'zod'
-import { config, rayernInternalOrigin } from '../config'
-import { readInstrumentationBlocks, unwrapRayernEnvelope } from '../rayernSync'
+import { readInstrumentationBlocks, readCachedRayernLogs } from '../rayernSync'
 import { getIngestionStatus } from '../rayernIngestion'
-import { normalizeInstrumentation, normalizeSynthetic, type SyntheticMonitoringDto } from '../instrumentation'
-import {
-  classifyFetchError,
-  listSyncDiagnostics,
-  MAX_SYNC_DIAGNOSTICS,
-  recordSyncDiagnostic,
-  sanitizeDiagnosticText,
-  type SyncDiagnosticOutcome,
-} from '../syncDiagnostics'
+import { normalizeInstrumentation, normalizeSynthetic } from '../instrumentation'
+import { listSyncDiagnostics, MAX_SYNC_DIAGNOSTICS } from '../syncDiagnostics'
 
 export const rayernInternalRouter = Router()
-
-/* ----------------------------- upstream call ----------------------------- */
-
-type UpstreamResult =
-  | { ok: true; value: unknown; requestId: string | null }
-  | {
-      ok: false
-      status: number
-      code: string
-      message: string
-      retryAfterSec?: number
-      requestId: string | null
-    }
-
-/**
- * Bounded GET against a fixed Rayern internal path with the service token.
- * Never throws; every failure becomes a typed result the route can render.
- */
-async function callRayernInternal(pathname: string, params: URLSearchParams): Promise<UpstreamResult> {
-  const origin = rayernInternalOrigin()
-  const token = config.rayern.monitoringToken
-
-  if (!origin) {
-    return {
-      ok: false,
-      status: 503,
-      code: 'RAYERN_NOT_CONFIGURED',
-      message: 'Rayern API base URL is not configured on the dashboard backend.',
-      requestId: null,
-    }
-  }
-  if (!token) {
-    // Fail-closed, mirroring Rayern's own monitoring-token gate.
-    return {
-      ok: false,
-      status: 503,
-      code: 'RAYERN_MONITORING_TOKEN_NOT_CONFIGURED',
-      message: 'The Rayern monitoring token is not configured on the dashboard backend.',
-      requestId: null,
-    }
-  }
-
-  const url = new URL(pathname, origin)
-  for (const [key, value] of params) url.searchParams.set(key, value)
-
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), config.rayern.timeoutMs)
-  const startedAt = Date.now()
-  // `Response` in this scope is Express's; fetch's response is named explicitly.
-  let res: Awaited<ReturnType<typeof fetch>>
-  try {
-    res = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        // Server-side only. Never forwarded to the browser.
-        Authorization: `Bearer ${token}`,
-      },
-      signal: controller.signal,
-    })
-  } catch (err) {
-    const info = classifyFetchError(err, config.rayern.timeoutMs)
-    await recordInternalFailure(pathname, {
-      outcome: info.outcome,
-      status: null,
-      durationMs: Date.now() - startedAt,
-      code: info.code,
-      message: info.message,
-      startedAt,
-      finalUrl: null,
-    })
-    return {
-      ok: false,
-      status: 504,
-      code: info.code,
-      message:
-        info.outcome === 'timeout'
-          ? `Rayern did not respond within ${config.rayern.timeoutMs}ms.`
-          : 'Could not reach the Rayern API.',
-      requestId: null,
-    }
-  } finally {
-    clearTimeout(timer)
-  }
-
-  const durationMs = Date.now() - startedAt
-  const requestId = res.headers.get('x-request-id')
-  // Read the body as text first: an error response still has a body worth
-  // recording (sanitized) even when it is not JSON.
-  let bodyText: string | null = null
-  let body: unknown = null
-  try {
-    bodyText = await res.text()
-    body = bodyText ? JSON.parse(bodyText) : null
-  } catch {
-    body = null
-  }
-
-  const bodyLimit = res.status === 429 ? 50_000 : undefined
-  if (!res.ok) {
-    await recordInternalFailure(pathname, {
-      outcome: 'http_error',
-      status: res.status,
-      durationMs,
-      code: res.status === 429 ? 'RAYERN_RATE_LIMITED' : `UPSTREAM_${res.status}`,
-      message: `Rayern responded with HTTP ${res.status} ${res.statusText || ''}`.trim(),
-      responseBody: bodyText,
-      responseBodyLimit: bodyLimit,
-      responseHeaders: res.headers,
-      requestId,
-      startedAt,
-      finalUrl: res.url,
-    })
-  } else if (body === null) {
-    await recordInternalFailure(pathname, {
-      outcome: 'invalid_response',
-      status: res.status,
-      durationMs,
-      code: 'UPSTREAM_INVALID_JSON',
-      message: 'Rayern returned a body that could not be parsed as JSON.',
-      responseBody: bodyText,
-      responseHeaders: res.headers,
-      requestId,
-      startedAt,
-      finalUrl: res.url,
-    })
-  }
-
-  if (!res.ok) {
-    // Rayern's own error text is upstream data: it can echo a payload value,
-    // an address or a credential pair. Sanitize and bound it before it is
-    // stored (already sanitized) or handed to the browser.
-    const upstreamMessage = sanitizeDiagnosticText(
-      readUpstreamErrorMessage(body) ?? 'Rayern rejected the request.',
-      300,
-    )
-
-    // A Rayern rate limit is forwarded as a 429 with its Retry-After intact so
-    // the dashboard can say when a retry is reasonable — clearly labelled as
-    // RAYERN_RATE_LIMITED so it is never mistaken for the dashboard's own
-    // limiter. Everything else becomes 502 (upstream failure).
-    if (res.status === 429) {
-      const raw = res.headers.get('retry-after')
-      const secs = raw !== null ? Number(raw) : Number.NaN
-      return {
-        ok: false,
-        status: 429,
-        code: 'RAYERN_RATE_LIMITED',
-        message: upstreamMessage,
-        retryAfterSec: Number.isFinite(secs) && secs >= 0 ? Math.ceil(secs) : undefined,
-        requestId,
-      }
-    }
-
-    return {
-      ok: false,
-      status: 502,
-      code: res.status === 401 ? 'RAYERN_UNAUTHORIZED' : 'RAYERN_UPSTREAM_ERROR',
-      message: upstreamMessage,
-      requestId,
-    }
-  }
-
-  const unwrapped = unwrapRayernEnvelope(body)
-  if (!unwrapped.ok) {
-    await recordInternalFailure(pathname, {
-      outcome: 'invalid_response',
-      status: res.status,
-      durationMs,
-      code: 'RAYERN_REPORTED_FAILURE',
-      message: unwrapped.error,
-      responseHeaders: res.headers,
-      requestId,
-      startedAt,
-      finalUrl: res.url,
-    })
-    return { ok: false, status: 502, code: 'RAYERN_REPORTED_FAILURE', message: unwrapped.error, requestId }
-  }
-  return { ok: true, value: unwrapped.value, requestId }
-}
-
-/**
- * Records one failed on-demand internal call (logs / synthetic monitoring).
- * Same guarantees as the pull-sync recorder: best-effort, sanitized, bounded,
- * and it never alters the response the route returns.
- */
-async function recordInternalFailure(
-  pathname: string,
-  input: {
-    outcome: SyncDiagnosticOutcome
-    status: number | null
-    durationMs: number
-    code: string
-    message: string
-    responseBody?: string | null
-    responseBodyLimit?: number
-    responseHeaders?: Headers | null
-    requestId?: string | null
-    startedAt?: number | null
-    finalUrl?: string | null
-  },
-): Promise<void> {
-  let host = 'rayern'
-  try {
-    host = new URL(rayernInternalOrigin()).host
-  } catch {
-    // Keep the placeholder — never guess a host.
-  }
-  await recordSyncDiagnostic({
-    source: 'internal',
-    endpoint: pathname,
-    host,
-    method: 'GET',
-    outcome: input.outcome,
-    status: input.status,
-    durationMs: input.durationMs,
-    errorCode: input.code,
-    message: input.message,
-    responseBody: input.responseBody ?? null,
-    responseBodyLimit: input.responseBodyLimit,
-    responseHeaders: input.responseHeaders ?? null,
-    requestId: input.requestId ?? null,
-    startedAt: input.startedAt ?? null,
-    finalUrl: input.finalUrl ?? null,
-  })
-}
-
-/** Reads Rayern's `{ success:false, error:{ code, message } }` envelope, if present. */
-function readUpstreamErrorMessage(body: unknown): string | null {
-  if (typeof body !== 'object' || body === null || Array.isArray(body)) return null
-  const error = (body as { error?: unknown }).error
-  if (typeof error === 'object' && error !== null && !Array.isArray(error)) {
-    const message = (error as { message?: unknown }).message
-    if (typeof message === 'string' && message) return message.slice(0, 500)
-  }
-  const message = (body as { message?: unknown }).message
-  if (typeof message === 'string' && message) return message.slice(0, 500)
-  return null
-}
-
-function sendUpstreamError(res: Response, result: Extract<UpstreamResult, { ok: false }>): void {
-  const payload: Record<string, unknown> = {
-    success: false,
-    error: { code: result.code, message: result.message },
-    requestId: result.requestId,
-  }
-  if (result.retryAfterSec !== undefined) {
-    res.setHeader('Retry-After', String(result.retryAfterSec))
-    ;(payload.error as Record<string, unknown>).retryAfterSec = result.retryAfterSec
-  }
-  res.status(result.status).json(payload)
-}
 
 /* ------------------------------ GET /blocks ------------------------------ */
 
 /**
- * The instrumentation blocks the pull-sync persisted, already normalized into
- * the dashboard's DTOs. Returns `null` per block when Rayern has not (or could
- * not) supply it — missing is never rendered as zero.
+ * The instrumentation blocks persisted from the last Rayern snapshot/pull-sync,
+ * normalized into the dashboard's DTOs. Ordinary dashboard refresh reads this
+ * from the local database and never performs an outbound Rayern request.
+ * Returns `null` per block when Rayern has not (or could not) supply it —
+ * missing is never rendered as zero.
  */
 rayernInternalRouter.get('/blocks', async (_req: Request, res: Response, next: NextFunction) => {
   try {
@@ -310,7 +52,7 @@ rayernInternalRouter.get('/blocks', async (_req: Request, res: Response, next: N
   }
 })
 
-/* ------------------------------- GET /logs ------------------------------- */
+/* ------------------------------ GET /logs ------------------------------- */
 
 /** Match Rayern's documented retention exactly (7 days, 500 entries). */
 const LOG_STORE_MAX_ENTRIES = 500
@@ -318,8 +60,7 @@ const LOG_RETENTION_DAYS = 7
 
 const LogsQuery = z.object({
   limit: z.coerce.number().int().min(1).max(LOG_STORE_MAX_ENTRIES).default(100),
-  // A bounded token rather than an invented level taxonomy: Rayern owns the
-  // vocabulary, so an unknown-but-well-formed value is forwarded as-is.
+  // A bounded token rather than an invented level taxonomy.
   level: z
     .string()
     .regex(/^[A-Za-z][A-Za-z0-9_-]{0,15}$/, 'level must be a short alphanumeric token')
@@ -360,6 +101,19 @@ function sanitizeLogEntry(raw: unknown): LogEntry | null {
   return entry
 }
 
+function parseLogTimestamp(value: unknown): number | null {
+  if (typeof value !== 'string' || value === '') return null
+  const ms = Date.parse(value)
+  return Number.isNaN(ms) ? null : ms
+}
+
+/**
+ * Locally cached Rayern log view.
+ *
+ * Ordinary dashboard refresh reads from the local database only. The cache is
+ * populated by scheduled/background Rayern refresh (or snapshot ingestion paths
+ * that include logs), never by this request.
+ */
 rayernInternalRouter.get('/logs', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const parsed = LogsQuery.safeParse(req.query)
@@ -375,35 +129,37 @@ rayernInternalRouter.get('/logs', async (req: Request, res: Response, next: Next
     }
     const { limit, level } = parsed.data
     const since = parsed.data.since ? parsed.data.since : undefined
+    const sinceMs = since ? Date.parse(since) : null
 
-    const params = new URLSearchParams()
-    params.set('limit', String(limit))
-    if (level !== undefined) params.set('level', level)
-    if (since !== undefined) params.set('since', since)
+    const cached = await readCachedRayernLogs()
+    let rawEntries = Array.isArray(cached.entries) ? cached.entries : []
 
-    const upstream = await callRayernInternal('/internal/logs', params)
-    if (!upstream.ok) {
-      sendUpstreamError(res, upstream)
-      return
+    if (level) {
+      const wanted = level.toLowerCase()
+      rawEntries = rawEntries.filter((e) => {
+        if (typeof e !== 'object' || e === null || Array.isArray(e)) return false
+        const lv = (e as Record<string, unknown>).level
+        return typeof lv === 'string' && lv.toLowerCase() === wanted
+      })
+    }
+    if (sinceMs !== null) {
+      rawEntries = rawEntries.filter((e) => {
+        if (typeof e !== 'object' || e === null || Array.isArray(e)) return false
+        const ts = parseLogTimestamp((e as Record<string, unknown>).at)
+        // Entries without a parseable timestamp are kept (conservative).
+        return ts === null || ts >= sinceMs
+      })
     }
 
-    const value = upstream.value
-    const rawEntries = Array.isArray(value)
-      ? value
-      : Array.isArray((value as { logs?: unknown })?.logs)
-        ? ((value as { logs: unknown[] }).logs)
-        : Array.isArray((value as { entries?: unknown })?.entries)
-          ? ((value as { entries: unknown[] }).entries)
-          : []
-
-    const entries = rawEntries.map(sanitizeLogEntry).filter((e): e is LogEntry => e !== null)
+    const entries = rawEntries.slice(0, limit).map(sanitizeLogEntry).filter((e): e is LogEntry => e !== null)
 
     res.json({
       entries,
       meta: {
-        source: '/internal/logs',
-        requestId: upstream.requestId,
-        fetchedAt: new Date().toISOString(),
+        source: 'local-cache',
+        requestId: null,
+        fetchedAt: cached.fetchedAt ?? cached.updatedAt ?? new Date().toISOString(),
+        cachedAt: cached.updatedAt,
         level: level ?? null,
         since: since ?? null,
         limit,
@@ -411,7 +167,11 @@ rayernInternalRouter.get('/logs', async (req: Request, res: Response, next: Next
         retentionDays: LOG_RETENTION_DAYS,
         maxEntries: LOG_STORE_MAX_ENTRIES,
         durable: false,
-        note: `In-process store: at most ${LOG_STORE_MAX_ENTRIES} entries over the last ${LOG_RETENTION_DAYS} days. Older log lines are not retrievable.`,
+        localOnly: true,
+        note:
+          cached.updatedAt === null
+            ? `No cached Rayern logs are stored yet. Logs are refreshed by scheduled/background Rayern sync, not by ordinary dashboard Update. The upstream store keeps at most ${LOG_STORE_MAX_ENTRIES} entries over the last ${LOG_RETENTION_DAYS} days.`
+            : `Cached locally from the last scheduled Rayern refresh (${cached.updatedAt}). Ordinary dashboard Update does not contact Rayern. The upstream store keeps at most ${LOG_STORE_MAX_ENTRIES} entries over the last ${LOG_RETENTION_DAYS} days.`,
       },
     })
   } catch (err) {
@@ -421,46 +181,42 @@ rayernInternalRouter.get('/logs', async (req: Request, res: Response, next: Next
 
 /* --------------------- GET /synthetic-monitoring ------------------------- */
 
-function extractSyntheticValue(value: unknown): Record<string, unknown> | null {
-  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-    return value as Record<string, unknown>
-  }
-  return null
-}
-
+/**
+ * Locally stored synthetic monitoring block.
+ *
+ * This is the `syntheticMonitoring` instrumentation block persisted from the
+ * last Rayern snapshot/pull-sync in the local database. Ordinary dashboard
+ * refresh reads it locally and never performs an outbound Rayern request.
+ */
 rayernInternalRouter.get('/synthetic-monitoring', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const upstream = await callRayernInternal('/internal/synthetic-monitoring', new URLSearchParams())
-    if (!upstream.ok) {
-      sendUpstreamError(res, upstream)
-      return
-    }
+    const { blocks, syncedAt } = await readInstrumentationBlocks()
+    const rawSynthetic = blocks.syntheticMonitoring ?? null
 
-    const raw = extractSyntheticValue(upstream.value)
-    if (!raw) {
-      res.status(502).json({
-        success: false,
-        error: { code: 'RAYERN_UNRECOGNISED_SHAPE', message: 'Unexpected response shape from Rayern.' },
-        requestId: upstream.requestId,
-      })
-      return
-    }
+    const synthetic = rawSynthetic
+      ? normalizeSynthetic(rawSynthetic)
+      : normalizeSynthetic({ available: false, reason: 'not_reported', checks: [] })
 
-    const dto: SyntheticMonitoringDto = normalizeSynthetic(raw)
     res.json({
-      synthetic: dto,
+      synthetic,
       meta: {
-        source: '/internal/synthetic-monitoring',
-        requestId: upstream.requestId,
+        source: 'local-snapshot',
+        requestId: null,
         fetchedAt: new Date().toISOString(),
-        durable: false,
-        note: 'Produced by an external scheduler running scripts/synthetic-monitor.mjs. The dashboard only displays results.',
+        snapshotSyncedAt: syncedAt,
+        durable: true,
+        localOnly: true,
+        note:
+          syncedAt === null
+            ? 'No synthetic monitoring block has been stored locally yet. It arrives with Rayern snapshots/scheduled sync; ordinary dashboard Update does not contact Rayern.'
+            : `Served from the locally stored Rayern snapshot (last synced ${syncedAt}). Ordinary dashboard Update does not contact Rayern. The probe script itself must still run on an external scheduler.`,
       },
     })
   } catch (err) {
     next(err)
   }
 })
+
 
 /* ----------------------- GET /sync-diagnostics ---------------------------- */
 

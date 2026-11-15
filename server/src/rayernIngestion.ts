@@ -6,6 +6,7 @@ import {
   storeInstrumentation,
   extractInstrumentation,
   unwrapRayernEnvelope,
+  writeCachedRayernLogs,
   type SyncPayloadData,
 } from './rayernSync'
 
@@ -170,6 +171,28 @@ export async function ingestRayernSnapshot(raw: unknown): Promise<IngestionResul
       }
     }
     sections.push(...instrumentationSections)
+
+    // Optional logs cache in snapshot payload (push-based). Ordinary dashboard
+    // refresh reads cached logs from the local DB and never contacts Rayern.
+    try {
+      const raw = unwrapped.value as Record<string, unknown>
+      const logsValue = raw.logs ?? raw.serverLogs ?? raw.logEntries
+      const entries = Array.isArray(logsValue)
+        ? logsValue
+        : logsValue && typeof logsValue === 'object' && !Array.isArray(logsValue)
+          ? (Array.isArray((logsValue as { entries?: unknown }).entries)
+              ? ((logsValue as { entries: unknown[] }).entries)
+              : Array.isArray((logsValue as { logs?: unknown }).logs)
+                ? ((logsValue as { logs: unknown[] }).logs)
+                : null)
+          : null
+      if (entries) {
+        await writeCachedRayernLogs(entries, { fetchedAt: new Date().toISOString(), source: 'snapshot' })
+        sections.push('logs')
+      }
+    } catch (logErr) {
+      console.error('[rayern-ingestion] failed to cache logs from snapshot:', logErr)
+    }
 
     await recordSnapshot(snapshotId, unwrapped.value, 'success', undefined, data.generatedAt)
     await markIngestionSuccess(snapshotId)

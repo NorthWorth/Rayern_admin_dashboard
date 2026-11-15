@@ -423,6 +423,66 @@ export async function readInstrumentationBlocks(): Promise<{
   return { blocks, syncedAt: latest ? latest.toISOString() : null }
 }
 
+/* ---------------------- Cached Rayern logs (local read) -------------------- */
+
+/**
+ * Key for locally cached Rayern server log entries in `rayern_sync_state`.
+ * Ordinary dashboard refresh reads this cache and never contacts Rayern; the
+ * cache is populated only by scheduled/background refresh or snapshot ingestion.
+ */
+export const RAYERN_LOGS_CACHE_KEY = 'cache:rayern-logs'
+
+export interface CachedRayernLogs {
+  entries: unknown[]
+  updatedAt: string | null
+  fetchedAt: string | null
+  source?: string | null
+}
+
+function asLogEntries(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value
+  if (!isPlainObject(value)) return []
+  if (Array.isArray(value.logs)) return value.logs
+  if (Array.isArray(value.entries)) return value.entries
+  return []
+}
+
+export async function readCachedRayernLogs(): Promise<CachedRayernLogs> {
+  try {
+    const rows = await query<{ payload: unknown; updated_at: Date }>(
+      `SELECT payload, updated_at FROM rayern_sync_state WHERE key = $1`,
+      [RAYERN_LOGS_CACHE_KEY],
+    )
+    const row = rows[0]
+    if (!row) return { entries: [], updatedAt: null, fetchedAt: null }
+    const payload = isPlainObject(row.payload) ? row.payload : null
+    const entries = payload ? asLogEntries(payload.entries ?? payload.logs ?? payload) : asLogEntries(row.payload)
+    const fetchedAt = payload && typeof payload.fetchedAt === 'string' ? payload.fetchedAt : row.updated_at.toISOString()
+    const source = payload && typeof payload.source === 'string' ? payload.source : null
+    return { entries, updatedAt: row.updated_at.toISOString(), fetchedAt, source }
+  } catch {
+    return { entries: [], updatedAt: null, fetchedAt: null }
+  }
+}
+
+export async function writeCachedRayernLogs(
+  entries: unknown[],
+  meta?: { fetchedAt?: string | null; source?: string | null },
+): Promise<void> {
+  const payload = {
+    entries: Array.isArray(entries) ? entries.slice(0, 500) : [],
+    fetchedAt: meta?.fetchedAt ?? new Date().toISOString(),
+    source: meta?.source ?? 'scheduled',
+  }
+  await query(
+    `INSERT INTO rayern_sync_state (key, payload, updated_at)
+     VALUES ($1, $2, now())
+     ON CONFLICT (key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`,
+    [RAYERN_LOGS_CACHE_KEY, JSON.stringify(payload)],
+  )
+}
+
+
 // Re-export query because this module already owns the persistence helpers.
 import { query } from './db'
 import { config, rayernSyncEnabled } from './config'
