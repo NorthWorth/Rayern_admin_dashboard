@@ -187,7 +187,7 @@ export interface RayernSyncStatus {
   enabled: boolean
   status: HealthStatus
   lastSuccessAt: string | null
-  lastSuccessTransport: 'pull' | 'push' | null
+  lastSuccessTransport?: 'pull' | 'push' | null
   lastAttemptAt: string | null
   lastFailureAt: string | null
   lastError: string | null

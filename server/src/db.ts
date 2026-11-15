@@ -314,6 +314,7 @@ export async function initDb(): Promise<void> {
   await query(`ALTER TABLE rayern_sync_diagnostics ADD COLUMN IF NOT EXISTS reached_application BOOLEAN`)
   await query(`ALTER TABLE sync_status ADD COLUMN IF NOT EXISTS last_duration_ms INTEGER`)
   await query(`ALTER TABLE sync_status ADD COLUMN IF NOT EXISTS last_http_status INTEGER`)
+  await query(`ALTER TABLE sync_status ADD COLUMN IF NOT EXISTS last_success_transport TEXT CHECK (last_success_transport IN ('pull','push'))`)
   await query(`ALTER TABLE slow_operations ADD COLUMN IF NOT EXISTS avg_ms NUMERIC NOT NULL DEFAULT 0`)
   await query(`ALTER TABLE slow_operations ADD COLUMN IF NOT EXISTS p99 NUMERIC NOT NULL DEFAULT 0`)
 

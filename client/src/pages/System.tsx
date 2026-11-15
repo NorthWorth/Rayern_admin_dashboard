@@ -519,7 +519,7 @@ function SyncStatusCard({
     <Card>
       <CardHeader
         title="Rayern synchronization"
-        subtitle="The dashboard periodically pulls approved aggregates from the Rayern API — Rayern never calls the dashboard"
+        subtitle="Approved aggregates and the marketing audience arrive from Rayern by scheduled pull or by push; the newest successful transport is shown below"
       />
       <CardBody>
         {loading ? (

@@ -9,7 +9,6 @@ import { useToast } from './ui/Toast'
 import { useQuery } from '../hooks/useQuery'
 import { campaignsService } from '../services/campaigns'
 import { audienceService } from '../services/audience'
-import { rayernService } from '../services/rayern'
 import { emailsService } from '../services/emails'
 import { DEFAULT_FROM } from '../lib/api'
 import {
@@ -26,7 +25,6 @@ import {
   type RayernPlan,
   type SubscriptionStatus,
 } from '../lib/types'
-import type { RayernSyncStatus } from '../lib/types'
 
 /**
  * Email category. The category decides WHICH users may be selected and HOW the
@@ -55,6 +53,20 @@ function newIdempotencyKey(): string {
 
 function consentOf(user: AdminUserRecord): boolean {
   return user.marketingConsent?.optedIn === true
+}
+
+/** Promotional eligibility contract: opted in AND active AND email verified. */
+function isEligible(user: AdminUserRecord): boolean {
+  return consentOf(user) && (user.accountStatus ?? 'active') === 'active' && user.emailVerified === true
+}
+
+/** Human-readable reasons a synchronized recipient cannot receive promotional mail. */
+function exclusionReasons(user: AdminUserRecord): string[] {
+  const reasons: string[] = []
+  if ((user.accountStatus ?? 'active') !== 'active') reasons.push('account suspended')
+  if (user.emailVerified !== true) reasons.push('email not verified')
+  if (!consentOf(user)) reasons.push('not opted in')
+  return reasons
 }
 
 function reasonLabel(reason: string): string {
@@ -114,8 +126,10 @@ export function CampaignComposer({
   const allSynced = audienceQ.data?.items ?? []
   const syncedUsers: AdminUserRecord[] = allSynced.map((r) => audienceService.toAdminUserRecord(r))
   const filteredSynced = syncedUsers.filter((u) => {
-    const planVal = (u.subscription?.plan ?? 'starter') as RayernPlan
-    const statusVal = (u.subscription?.status ?? 'none') as SubscriptionStatus
+    // Filters use the actual synchronized values: a record without a plan or
+    // subscription never matches a specific plan/status filter.
+    const planVal = u.subscription?.plan as RayernPlan | undefined
+    const statusVal = u.subscription?.status as SubscriptionStatus | undefined
     const opted = consentOf(u)
     if (plan !== 'all' && planVal !== plan) return false
     if (subscriptionStatus !== 'all' && statusVal !== subscriptionStatus) return false
@@ -125,16 +139,25 @@ export function CampaignComposer({
   })
   const users = filteredSynced
   const pagination = null
+  const totalSynced = allSynced.length
+  const eligibleCount = allSynced.filter(
+    (r) => r.consentOptedIn && r.status === 'active' && r.emailVerified,
+  ).length
+  const ineligibleCount = totalSynced - eligibleCount
+  const lastSyncedAt = audienceQ.data?.lastSyncedAt ?? null
+  const staleSync =
+    lastSyncedAt !== null && Date.now() - new Date(lastSyncedAt).getTime() > 24 * 60 * 60 * 1000
 
   // Rayern-side audience sync status (present on the System page). Kept local;
   useEffect(() => {
+    // Auto-selection is a promotional convenience: seed manual mode with the
+    // recipients that satisfy the full eligibility contract. Service notices
+    // start empty because their recipients must be chosen explicitly.
+    if (!promotional) return
     if (mode === 'manual' && users.length > 0 && selected.length === 0) {
-      const eligible = users
-        .filter((u) => !promotional || (consentOf(u) && (u.accountStatus ?? 'active') === 'active'))
-        .map((u) => u.email)
-      setSelected(eligible)
+      setSelected(users.filter(isEligible).map((u) => u.email))
     }
-  }, [mode, users.length])
+  }, [promotional, mode, users.length])
 
   const audience: CampaignAudience | null = useMemo(() => {
     if (!promotional) {
@@ -161,6 +184,7 @@ export function CampaignComposer({
 
   const handleCategoryChange = (next: CampaignCategory): void => {
     setCategory(next)
+    setSelected([])
     setPreview(null)
     setPreviewError(null)
     setResult(null)
@@ -361,8 +385,12 @@ export function CampaignComposer({
               <ErrorState message={audienceQ.error} onRetry={() => audienceQ.refetch()} />
             ) : users.length === 0 ? (
               <EmptyState
-                title="No matching users"
-                description="No accounts match these filters. Widen the filters to see recipients."
+                title={totalSynced === 0 ? 'Audience not synchronized yet' : 'No matching users'}
+                description={
+                  totalSynced === 0
+                    ? 'No recipients have been received from Rayern. Campaigns stay empty until Rayern pushes the synchronized audience — no unverified or unsynchronized records are substituted.'
+                    : 'No synchronized accounts match these filters. Widen the filters to see recipients.'
+                }
               />
             ) : (
               <div className="overflow-x-auto rounded-md border border-ink-200">
@@ -375,12 +403,13 @@ export function CampaignComposer({
                       <th scope="col" className="px-3 py-2.5">Plan</th>
                       <th scope="col" className="px-3 py-2.5">Subscription</th>
                       <th scope="col" className="px-3 py-2.5">Consent</th>
+                      {promotional ? <th scope="col" className="px-3 py-2.5">Eligibility</th> : null}
                     </tr>
                   </thead>
                   <tbody>
                     {users.map((user) => {
                       const opted = consentOf(user)
-                      const selectable = !promotional || (opted && (user.accountStatus ?? 'active') === 'active')
+                      const selectable = !promotional || isEligible(user)
                       return (
                         <tr key={user.id} className="border-b border-ink-100 last:border-0 hover:bg-ink-50/70">
                           <td className="px-3 py-2">
@@ -398,12 +427,16 @@ export function CampaignComposer({
                             {[user.firstName, user.lastName].filter(Boolean).join(' ') || '—'}
                           </td>
                           <td className="px-3 py-2">
-                            <Badge tone={(user.subscription?.plan ?? 'starter') === 'starter' ? 'neutral' : 'blue'}>
-                              {user.subscription?.plan ?? 'starter'}
-                            </Badge>
+                            {user.subscription?.plan ? (
+                              <Badge tone={user.subscription.plan === 'starter' ? 'neutral' : 'blue'}>
+                                {user.subscription.plan}
+                              </Badge>
+                            ) : (
+                              <span className="text-ink-400">—</span>
+                            )}
                           </td>
                           <td className="px-3 py-2 text-ink-600">
-                            {(user.subscription?.status ?? 'none').replace(/_/g, ' ')}
+                            {user.subscription?.status?.replace(/_/g, ' ') ?? '—'}
                           </td>
                           <td className="px-3 py-2">
                             {opted ? (
@@ -414,6 +447,17 @@ export function CampaignComposer({
                               <Badge tone="neutral">no consent</Badge>
                             )}
                           </td>
+                          {promotional ? (
+                            <td className="px-3 py-2">
+                              {isEligible(user) ? (
+                                <Badge tone="green">eligible</Badge>
+                              ) : (
+                                <span className="text-xs text-amber-700">
+                                  {exclusionReasons(user).join(' · ')}
+                                </span>
+                              )}
+                            </td>
+                          ) : null}
                         </tr>
                       )
                     })}
@@ -424,7 +468,15 @@ export function CampaignComposer({
 
             <div className="rounded-md border border-ink-200 bg-ink-50/60 px-3 py-2 text-xs text-ink-600">
               <span className="font-semibold text-ink-800">Counts:</span>{' '}
-              total synchronised {allSynced.length} · eligible (consent + active) {allSynced.filter((r) => r.consentOptedIn && r.status === 'active' && r.emailVerified).length} · selected {selected.length} · excluded {allSynced.length - selected.length}
+              total synchronised {totalSynced} · eligible (opted in + active + verified) {eligibleCount} · not
+              eligible {ineligibleCount} · selected {selected.length} · not selected{' '}
+              {totalSynced - selected.length}
+              <div className="mt-1">
+                {lastSyncedAt
+                  ? `Last synchronized ${new Date(lastSyncedAt).toLocaleString()}`
+                  : 'Audience has not been synchronized yet — Rayern must push the audience before any recipient is available.'}
+                {staleSync ? ' · sync looks stale, re-sync before sending' : ''}
+              </div>
             </div>
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-ink-500">
               <span>

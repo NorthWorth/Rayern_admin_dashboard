@@ -20,54 +20,82 @@ vi.mock('../services/emails', () => ({
   },
 }))
 
+// The composer reads recipients from the locally synchronized audience only.
+// Keep the real record->AdminUserRecord mapper (so the test exercises it) and
+// replace just the network call.
+vi.mock('../services/audience', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../services/audience')>()
+  return {
+    ...actual,
+    audienceService: { ...actual.audienceService, list: vi.fn() },
+  }
+})
+
 import { campaignsService } from '../services/campaigns'
+import { audienceService, type SyncedAudienceRecord } from '../services/audience'
 import { emailsService } from '../services/emails'
 import { CampaignComposer } from '../components/CampaignComposer'
 import { ToastProvider } from '../components/ui/Toast'
-import type { AdminUserFilters, AdminUsersPage, CampaignPreviewResponse, CampaignSendResponse } from '../lib/types'
+import type { CampaignPreviewResponse, CampaignSendResponse } from '../lib/types'
 
-const ADA = {
-  id: 'u1',
+const ADA: SyncedAudienceRecord = {
   email: 'ada@example.com',
   firstName: 'Ada',
   lastName: 'Lovelace',
-  accountStatus: 'active',
-  marketingConsent: { optedIn: true, source: 'settings' },
-  subscription: { plan: 'pro', status: 'active', billingInterval: 'monthly', hasPaidAccess: true },
+  status: 'active',
+  emailVerified: true,
+  workspacePlan: 'pro',
+  subscriptionPlan: 'pro',
+  subscriptionStatus: 'active',
+  hasPaidAccess: true,
+  consentOptedIn: true,
+  consentedAt: '2026-11-01T00:00:00.000Z',
+  consentSource: 'settings',
+  syncedAt: '2026-11-15T00:00:00.000Z',
 }
-const GRACE = {
-  id: 'u2',
+const GRACE: SyncedAudienceRecord = {
   email: 'grace@example.com',
   firstName: 'Grace',
   lastName: 'Hopper',
-  accountStatus: 'active',
-  marketingConsent: { optedIn: true, source: 'settings' },
-  subscription: { plan: 'premium', status: 'active', billingInterval: 'annual', hasPaidAccess: true },
+  status: 'active',
+  emailVerified: true,
+  workspacePlan: 'premium',
+  subscriptionPlan: 'premium',
+  subscriptionStatus: 'active',
+  hasPaidAccess: true,
+  consentOptedIn: true,
+  consentedAt: '2026-11-02T00:00:00.000Z',
+  consentSource: 'settings',
+  syncedAt: '2026-11-15T00:00:00.000Z',
 }
-const ALAN = {
-  id: 'u3',
+const ALAN: SyncedAudienceRecord = {
   email: 'alan@example.com',
   firstName: 'Alan',
   lastName: 'Turing',
-  accountStatus: 'active',
-  marketingConsent: { optedIn: false, source: 'settings' },
-  subscription: { plan: 'pro', status: 'canceled', billingInterval: 'monthly', hasPaidAccess: false },
+  status: 'active',
+  emailVerified: true,
+  workspacePlan: 'pro',
+  subscriptionPlan: 'pro',
+  subscriptionStatus: 'canceled',
+  hasPaidAccess: false,
+  consentOptedIn: false,
+  consentedAt: null,
+  consentSource: 'settings',
+  syncedAt: '2026-11-15T00:00:00.000Z',
 }
 
-/** Mirrors the server: the consent filter decides which rows are returned. */
-function pageFor(filters: AdminUserFilters): AdminUsersPage {
-  const all = [ADA, GRACE, ALAN]
-  const users =
-    filters.consent === 'opted_in'
-      ? all.filter((u) => u.marketingConsent.optedIn)
-      : filters.consent === 'opted_out'
-        ? all.filter((u) => !u.marketingConsent.optedIn)
-        : all
+function audienceFor(items: SyncedAudienceRecord[] = [ADA, GRACE, ALAN]) {
   return {
-    pagination: { page: filters.page ?? 1, limit: filters.limit ?? 50, totalResults: users.length, totalPages: 1 },
-    filters: { plan: null, subscriptionStatus: null, consent: filters.consent ?? null },
-    currency: 'USD',
-    users,
+    items,
+    counts: {
+      total: items.length,
+      eligible: items.filter((r) => r.consentOptedIn && r.status === 'active' && r.emailVerified).length,
+      optedIn: items.filter((r) => r.consentOptedIn).length,
+      optedOut: items.filter((r) => !r.consentOptedIn).length,
+      suspended: items.filter((r) => r.status !== 'active').length,
+      unverified: items.filter((r) => !r.emailVerified).length,
+    },
+    lastSyncedAt: '2026-11-15T00:00:00.000Z',
   }
 }
 
@@ -87,29 +115,25 @@ async function composeAndSend(subject: string, message: string, button: RegExp):
 
 beforeEach(() => {
   vi.clearAllMocks()
-  vi.mocked(campaignsService.listUsers).mockImplementation(async (filters) => pageFor(filters ?? {}))
+  vi.mocked(audienceService.list).mockResolvedValue(audienceFor())
 })
 
 describe('recipient selection and marketing consent', () => {
-  test('promotional sends list only opted-in users (consent filter forced server-side)', async () => {
+  test('promotional sends list only opted-in users from the synchronized audience', async () => {
     renderComposer()
 
     await screen.findByText('ada@example.com')
-    expect(campaignsService.listUsers).toHaveBeenCalledWith(expect.objectContaining({ consent: 'opted_in' }))
+    expect(audienceService.list).toHaveBeenCalledTimes(1)
     expect(screen.getByText('grace@example.com')).toBeInTheDocument()
     // The opted-out account is filtered out of the promotional picker entirely.
     expect(screen.queryByText('alan@example.com')).not.toBeInTheDocument()
   })
 
-  test('an opted-out user is never selectable for a promotional campaign', async () => {
-    // Even if a row with revoked consent somehow appears, its checkbox is disabled.
-    vi.mocked(campaignsService.listUsers).mockResolvedValue(pageFor({ consent: 'all' }))
+  test('an opted-out recipient is never offered for a promotional campaign', async () => {
     renderComposer()
 
-    await screen.findByText('alan@example.com')
-    fireEvent.click(screen.getByLabelText('Choose individuals'))
-    expect(screen.getByLabelText('Select ada@example.com')).toBeEnabled()
-    expect(screen.getByLabelText('Select alan@example.com')).toBeDisabled()
+    await screen.findByText('ada@example.com')
+    expect(screen.queryByLabelText('Select alan@example.com')).not.toBeInTheDocument()
   })
 
   test('non-promotional category allows choosing users who did not opt in', async () => {
@@ -121,11 +145,10 @@ describe('recipient selection and marketing consent', () => {
     fireEvent.change(screen.getByLabelText('Filter by marketing consent'), { target: { value: 'opted_out' } })
 
     await screen.findByText('alan@example.com')
-    expect(campaignsService.listUsers).toHaveBeenCalledWith(expect.objectContaining({ consent: 'opted_out' }))
     expect(screen.getByLabelText('Select alan@example.com')).toBeEnabled()
   })
 
-  test('plan and subscription-status filters are forwarded to the users API', async () => {
+  test('plan and subscription filters use the synchronized values', async () => {
     renderComposer()
 
     await screen.findByText('ada@example.com')
@@ -133,11 +156,48 @@ describe('recipient selection and marketing consent', () => {
     fireEvent.change(screen.getByLabelText('Filter by plan'), { target: { value: 'pro' } })
     fireEvent.change(screen.getByLabelText('Filter by subscription status'), { target: { value: 'active' } })
 
-    await waitFor(() =>
-      expect(campaignsService.listUsers).toHaveBeenCalledWith(
-        expect.objectContaining({ plan: 'pro', subscriptionStatus: 'active', consent: 'opted_in' }),
-      ),
-    )
+    await waitFor(() => expect(screen.queryByText('grace@example.com')).not.toBeInTheDocument())
+    expect(screen.getByText('ada@example.com')).toBeInTheDocument()
+    // Eligibility is explained for excluded synchronized recipients.
+    expect(screen.queryByText('alan@example.com')).not.toBeInTheDocument()
+  })
+
+  test('auto-selects only verified, active, opted-in recipients in manual mode', async () => {
+    const suspended: SyncedAudienceRecord = {
+      ...GRACE,
+      email: 'margaret@example.com',
+      status: 'suspended',
+    }
+    const unverified: SyncedAudienceRecord = {
+      ...GRACE,
+      email: 'unverified@example.com',
+      emailVerified: false,
+    }
+    vi.mocked(audienceService.list).mockResolvedValue(audienceFor([ADA, suspended, unverified]))
+    vi.mocked(campaignsService.send).mockResolvedValue({
+      duplicate: false,
+      campaign: {
+        id: 'c-auto',
+        status: 'completed',
+        subject: 'Hello',
+        audience: { type: 'manual_emails', emails: ['ada@example.com'] },
+        totals: { resolved: 1, accepted: 1, failed: 0, skipped: 0 },
+        accepted: [{ email: 'ada@example.com' }],
+        failed: [],
+        skipped: [],
+      },
+    } as CampaignSendResponse)
+
+    renderComposer()
+    await screen.findByText('ada@example.com')
+    fireEvent.click(screen.getByLabelText('Choose individuals'))
+
+    await waitFor(() => expect(screen.getByLabelText('Select ada@example.com')).toBeChecked())
+    await composeAndSend('Hello', 'Hi', /send campaign/i)
+
+    await waitFor(() => expect(campaignsService.send).toHaveBeenCalledTimes(1))
+    const payload = vi.mocked(campaignsService.send).mock.calls[0][0]
+    expect(payload.audience).toEqual({ type: 'manual_emails', emails: ['ada@example.com'] })
   })
 })
 
@@ -161,7 +221,8 @@ describe('campaign send', () => {
     await screen.findByText('ada@example.com')
 
     fireEvent.click(screen.getByLabelText('Choose individuals'))
-    fireEvent.click(screen.getByLabelText('Select ada@example.com'))
+    await waitFor(() => expect(screen.getByLabelText('Select grace@example.com')).toBeChecked())
+    fireEvent.click(screen.getByLabelText('Select grace@example.com'))
     await composeAndSend('Hello', '<p>Hi there</p>', /send campaign/i)
 
     await waitFor(() => expect(campaignsService.send).toHaveBeenCalledTimes(1))
@@ -248,7 +309,8 @@ describe('campaign send', () => {
     fireEvent.change(screen.getByLabelText('Filter by marketing consent'), { target: { value: 'opted_out' } })
     await screen.findByText('alan@example.com')
 
-    fireEvent.click(screen.getByLabelText('Select alan@example.com'))
+    const alan = screen.getByLabelText('Select alan@example.com') as HTMLInputElement
+    if (!alan.checked) fireEvent.click(alan)
     await composeAndSend('Scheduled maintenance', 'We will be down Sunday.', /send notice/i)
 
     await waitFor(() => expect(emailsService.send).toHaveBeenCalledTimes(1))

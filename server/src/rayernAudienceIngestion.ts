@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { query } from './db'
+import { markPushSyncSuccess } from './rayernSync'
 
 export interface AudienceIngestionResult {
   ok: boolean
@@ -114,6 +115,14 @@ export async function ingestRayernAudience(raw: unknown): Promise<AudienceIngest
     } else {
       const res = await query<{ email: string }>(`DELETE FROM rayern_audience RETURNING email`)
       removed = res.length
+    }
+
+    // A successfully applied audience snapshot is a successful push transport: it
+    // advances the same canonical "last successful sync" metadata as a pull.
+    try {
+      await markPushSyncSuccess()
+    } catch {
+      // status bookkeeping is best-effort; the audience write already succeeded
     }
 
     return { ok: true, syncId: syncId ?? undefined, received, upserted: received, removed }

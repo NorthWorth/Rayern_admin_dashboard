@@ -446,6 +446,7 @@ router.get('/overview', async (_req, res, next) => {
         enabled: sync.enabled,
         status: syncStatus,
         lastSuccessAt: sync.lastSuccessAt,
+        lastSuccessTransport: sync.lastSuccessTransport,
         lastAttemptAt: sync.lastAttemptAt,
         lastFailureAt: sync.lastFailureAt,
         lastError: sync.lastError,

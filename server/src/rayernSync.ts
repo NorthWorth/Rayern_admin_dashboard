@@ -530,6 +530,7 @@ export function formatIntervalMs(ms: number): string {
 interface SyncStatusRow {
   last_attempt_at: Date | null
   last_success_at: Date | null
+  last_success_transport: 'pull' | 'push' | null
   last_failure_at: Date | null
   last_error: string | null
   consecutive_failures: number
@@ -540,7 +541,7 @@ interface SyncStatusRow {
 
 async function readSyncStatus(): Promise<SyncStatusRow | null> {
   const rows = await query<SyncStatusRow>(
-    `SELECT last_attempt_at, last_success_at, last_failure_at, last_error, consecutive_failures, enabled,
+    `SELECT last_attempt_at, last_success_at, last_success_transport, last_failure_at, last_error, consecutive_failures, enabled,
             last_duration_ms, last_http_status
      FROM sync_status WHERE id = 1`,
   )
@@ -567,13 +568,29 @@ async function markAttempt(): Promise<void> {
 async function markSuccess(sections: string[], durationMs: number, httpStatus: number | null): Promise<void> {
   await query(
     `UPDATE sync_status
-     SET last_success_at = now(), last_failure_at = NULL, last_error = NULL,
+     SET last_success_at = now(), last_success_transport = 'pull', last_failure_at = NULL, last_error = NULL,
          consecutive_failures = 0, updated_at = now(),
          last_duration_ms = $1, last_http_status = COALESCE($2, last_http_status)
      WHERE id = 1`,
     [Math.round(durationMs), httpStatus],
   )
   await recordAudit('rayern-sync', 'system', 'sync.completed', 'rayern', { sections: sections.join(', ') })
+}
+
+/**
+ * Canonical successful PUSH transport bookkeeping. Rayern pushes snapshots and
+ * the synchronized audience to the dashboard; a successful push moves the same
+ * "last successful sync" timestamp as a successful pull, so the status card
+ * never reports a stale pull-only timestamp while pushes are arriving. The
+ * pull worker's own failure state is deliberately left untouched: delivering
+ * data does not prove the outbound pull is healthy.
+ */
+export async function markPushSyncSuccess(): Promise<void> {
+  await query(
+    `UPDATE sync_status
+     SET last_success_at = now(), last_success_transport = 'push', updated_at = now()
+     WHERE id = 1`,
+  )
 }
 
 async function markFailure(error: string, durationMs: number | null, httpStatus: number | null): Promise<void> {
@@ -1109,6 +1126,7 @@ export async function getSyncStatus(): Promise<{
   enabled: boolean
   lastAttemptAt: string | null
   lastSuccessAt: string | null
+  lastSuccessTransport: 'pull' | 'push' | null
   lastFailureAt: string | null
   lastError: string | null
   consecutiveFailures: number
@@ -1143,10 +1161,16 @@ export async function getSyncStatus(): Promise<{
   const stale =
     rayernSyncEnabled() &&
     (lastSuccessAt === null || Date.now() - new Date(lastSuccessAt).getTime() > config.rayern.intervalMs * 2.5)
+  // Push delivery is a first-class transport: sync is "enabled" when either the
+  // outbound pull or a push ingestion token is configured.
+  const pushEnabled = Boolean(
+    process.env.RAYERN_SNAPSHOT_TOKEN?.trim() || process.env.RAYERN_MONITORING_TOKEN?.trim(),
+  )
   return {
-    enabled: rayernSyncEnabled(),
+    enabled: rayernSyncEnabled() || pushEnabled,
     lastAttemptAt: row?.last_attempt_at?.toISOString() ?? null,
     lastSuccessAt,
+    lastSuccessTransport: row?.last_success_transport ?? null,
     lastFailureAt: row?.last_failure_at?.toISOString() ?? null,
     lastError: row?.last_error ?? null,
     consecutiveFailures: row?.consecutive_failures ?? 0,

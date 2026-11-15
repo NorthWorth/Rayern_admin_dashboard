@@ -7,6 +7,7 @@ import {
   extractInstrumentation,
   unwrapRayernEnvelope,
   writeCachedRayernLogs,
+  markPushSyncSuccess,
   type SyncPayloadData,
 } from './rayernSync'
 
@@ -77,6 +78,8 @@ async function markIngestionSuccess(snapshotId: string): Promise<void> {
        updated_at = now()`,
     [snapshotId],
   )
+  // Push delivery moves the canonical "last successful sync" metadata too.
+  await markPushSyncSuccess()
 }
 
 async function markIngestionFailure(error: string): Promise<void> {
@@ -146,14 +149,34 @@ export async function ingestRayernSnapshot(raw: unknown): Promise<IngestionResul
   const data = parsed.data
   const snapshotId = data.snapshotId
 
-  // Idempotency: a repeat delivery of the same snapshot id is a success.
+  // Idempotency: a repeat delivery of the same snapshot id is a success, but
+  // it must NOT advance the canonical success timestamp — a redelivery of an
+  // old snapshot would otherwise make the sync look fresher than it is.
   try {
     if (await snapshotExists(snapshotId)) {
-      await markIngestionSuccess(snapshotId)
       return { ok: true, idempotent: true, snapshotId, sections: [] }
     }
   } catch {
     // fall through
+  }
+
+  // Out-of-order protection: a snapshot generated before the newest successful
+  // one cannot overwrite newer sync metadata. It is accepted as a benign
+  // duplicate and ignored.
+  if (data.generatedAt) {
+    try {
+      const latest = await query<{ generated_at: string | null }>(
+        `SELECT generated_at FROM rayern_snapshots
+         WHERE status = 'success' AND generated_at IS NOT NULL
+         ORDER BY generated_at DESC LIMIT 1`,
+      )
+      const newest = latest[0]?.generated_at ?? null
+      if (newest !== null && data.generatedAt < newest) {
+        return { ok: true, idempotent: true, snapshotId, sections: [] }
+      }
+    } catch {
+      // fall through
+    }
   }
 
   try {
