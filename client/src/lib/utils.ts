@@ -15,7 +15,8 @@ export function formatCompact(n: number): string {
   return new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(n)
 }
 
-export function formatPct(n: number, digits = 1): string {
+export function formatPct(n: number | null | undefined, digits = 1): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return '—'
   return `${n.toFixed(digits)}%`
 }
 

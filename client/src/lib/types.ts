@@ -148,7 +148,7 @@ export interface ServiceHealth {
   name: string
   kind: 'api' | 'database' | 'cache' | 'queue' | 'email' | 'storage'
   status: HealthStatus
-  uptimePct30d: number
+  uptimePct30d: number | null
   latencyMsP50: number
   latencyMsP95: number
   lastIncidentAt: string | null
