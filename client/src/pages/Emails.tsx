@@ -16,7 +16,7 @@ import { rayernService } from '../services/rayern'
 import { CampaignComposer } from '../components/CampaignComposer'
 import { UnavailablePanel } from '../components/UnavailablePanel'
 import { DEFAULT_FROM } from '../lib/api'
-import { formatCount, formatDateTime, formatNumber, rayernReasonText, timeAgo, titleCase } from '../lib/utils'
+import { formatCount, formatDateTime, formatNumber, formatPct, rayernReasonText, timeAgo, titleCase } from '../lib/utils'
 import type { EmailStatus, EmailType, MarketingConsentBlock } from '../lib/types'
 
 const TYPE_LABELS: Record<EmailType, string> = {
@@ -414,7 +414,7 @@ function MarketingConsentCard({
               <KpiCard label="Registered users" value={formatCount(block.totalRegisteredUsers)} />
               <KpiCard
                 label="Opt-in share"
-                value={block.optedInPct != null ? `${block.optedInPct.toFixed(1)}%` : '—'}
+                value={formatPct(block.optedInPct, 1)}
                 sub={block.optedInPct != null ? undefined : 'Undefined on an empty base'}
               />
             </div>

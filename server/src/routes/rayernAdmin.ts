@@ -33,6 +33,8 @@ const router = Router()
 /* ------------------------------ Upstream auth ----------------------------- */
 
 let cachedSession: { token: string; expiresAt: number } | null = null
+let loginInFlight: Promise<string> | null = null
+let loginBackoffUntil = 0
 
 /** Error carrying the HTTP status so responses can be mirrored faithfully. */
 function statusError(status: number, message: string): Error & { status: number } {
@@ -65,38 +67,74 @@ function extractLoginToken(payload: unknown): string | null {
 /** Rayern access tokens live ~15 minutes; refresh a little before expiry. */
 const SESSION_TTL_MS = 10 * 60_000
 
+/** Parses Retry-After: delta-seconds or an HTTP date. Null when absent/invalid. */
+function parseRetryAfter(header: string | null): number | null {
+  if (!header) return null
+  const secs = Number(header)
+  if (Number.isFinite(secs) && secs >= 0) return Math.floor(secs)
+  const dateMs = Date.parse(header)
+  if (!Number.isNaN(dateMs)) return Math.max(0, Math.ceil((dateMs - Date.now()) / 1000))
+  return null
+}
+
 async function rayernSessionToken(): Promise<string> {
   if (cachedSession && cachedSession.expiresAt > Date.now()) return cachedSession.token
 
-  const res = await fetch(`${config.rayern.apiBaseUrl}/api/v1/auth/login`, {
-    method: 'POST',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email: config.rayern.adminEmail, password: config.rayern.adminPassword }),
-  })
+  // Never hammer Rayern's login endpoint: if a recent attempt was rate-limited,
+  // honour its backoff window instead of issuing another login.
+  if (Date.now() < loginBackoffUntil) {
+    const waitSec = Math.ceil((loginBackoffUntil - Date.now()) / 1000)
+    throw statusError(429, `Rayern admin login is backing off after HTTP 429 (retry in ${waitSec}s)`)
+  }
 
-  let payload: unknown = null
+  // Single-flight: concurrent proxy requests share one login instead of each
+  // triggering its own (which is what exhausted Rayern's credential limiter).
+  if (loginInFlight) return loginInFlight
+
+  loginInFlight = (async () => {
+    const res = await fetch(`${config.rayern.apiBaseUrl}/api/v1/auth/login`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: config.rayern.adminEmail, password: config.rayern.adminPassword }),
+    })
+
+    let payload: unknown = null
+    try {
+      payload = await res.json()
+    } catch {
+      payload = null
+    }
+
+    const token = res.ok ? extractLoginToken(payload) : null
+    if (!token) {
+      // Honour Retry-After on a rate-limited login so we do not retry into a 429.
+      if (res.status === 429) {
+        const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'))
+        const backoffMs = retryAfterSec !== null ? Math.min(retryAfterSec, 3600) * 1000 : 60_000
+        loginBackoffUntil = Date.now() + backoffMs
+      }
+      // Never log credentials or tokens — only the upstream status.
+      throw statusError(
+        res.status >= 400 && res.status < 600 ? res.status : 502,
+        `Rayern admin login failed (HTTP ${res.status}); check RAYERN_ADMIN_EMAIL / RAYERN_ADMIN_PASSWORD`,
+      )
+    }
+
+    cachedSession = { token, expiresAt: Date.now() + SESSION_TTL_MS }
+    return token
+  })()
+
   try {
-    payload = await res.json()
-  } catch {
-    payload = null
+    return await loginInFlight
+  } finally {
+    loginInFlight = null
   }
-
-  const token = res.ok ? extractLoginToken(payload) : null
-  if (!token) {
-    // Never log credentials or tokens — only the upstream status.
-    throw statusError(
-      res.status >= 400 && res.status < 600 ? res.status : 502,
-      `Rayern admin login failed (HTTP ${res.status}); check RAYERN_ADMIN_EMAIL / RAYERN_ADMIN_PASSWORD`,
-    )
-  }
-
-  cachedSession = { token, expiresAt: Date.now() + SESSION_TTL_MS }
-  return token
 }
 
 interface UpstreamResponse {
   status: number
   payload: unknown
+  retryAfterSec?: number
 }
 
 /** Forwards an authenticated request to Rayern, re-login once on 401. */
@@ -132,6 +170,15 @@ async function forwardToRayern(
     res = await call()
   }
 
+  // Surface an upstream rate limit (including Retry-After) instead of retrying
+  // into it. Rayern's 429 is a real signal, never a reason to re-login.
+  let retryAfterSec: number | undefined
+  if (res.status === 429) {
+    const raw = res.headers.get('retry-after')
+    const secs = raw !== null ? Number(raw) : Number.NaN
+    retryAfterSec = Number.isFinite(secs) && secs >= 0 ? Math.ceil(secs) : undefined
+  }
+
   let payload: unknown = null
   try {
     payload = await res.json()
@@ -143,12 +190,15 @@ async function forwardToRayern(
     throw statusError(502, `Rayern responded with an unreadable payload (HTTP ${res.status})`)
   }
 
-  return { status: res.status, payload }
+  return { status: res.status, payload, retryAfterSec }
 }
 
 function relay(res: ExpressResponse, upstream: UpstreamResponse): void {
   // The Rayern envelope ({ success, data } / { success, error }) and its HTTP
   // status are passed through unchanged so the frontend sees the contract.
+  if (upstream.retryAfterSec !== undefined) {
+    res.setHeader('Retry-After', String(upstream.retryAfterSec))
+  }
   res.status(upstream.status).json(upstream.payload)
 }
 

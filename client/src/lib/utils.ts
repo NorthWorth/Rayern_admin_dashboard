@@ -17,14 +17,23 @@ export function formatCompact(n: number): string {
 
 export function formatPct(n: number | null | undefined, digits = 1): string {
   if (n === null || n === undefined || !Number.isFinite(n)) return '—'
-  return `${n.toFixed(digits)}%`
+  const d = Math.min(Math.max(0, Math.trunc(digits)), 2)
+  return `${n.toFixed(d)}%`
 }
 
-export function formatDuration(ms: number): string {
-  if (ms >= 1000) return `${(ms / 1000).toFixed(ms >= 10000 ? 0 : 1)}s`
-  if (ms >= 1) return `${Math.round(ms)}ms`
-  return `${ms.toFixed(2)}ms`
+/** Alias kept for callers that prefer the longer name. */
+export const formatPercentage = formatPct
+
+export function formatDuration(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return '—'
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  return `${(ms / 1000).toFixed(2)}s`
 }
+
+/** Alias kept for callers that prefer the shorter name. */
+export const formatMs = formatDuration
+export const formatMilliseconds = formatDuration
+export const formatLatency = formatDuration
 
 export function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
