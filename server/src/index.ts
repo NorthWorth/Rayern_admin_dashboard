@@ -41,6 +41,7 @@ import rayernPushRoutes from './routes/rayernPush'
 import { metricsRouter, METRICS_EXEMPT_PATHS } from './routes/metrics'
 import { startSyncWorker, startWakeupWorker } from './rayernSync'
 import { initTelemetry, telemetryMiddleware } from './telemetry'
+import { correlationMiddleware } from './requestContext'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
@@ -56,6 +57,8 @@ app.disable('x-powered-by')
 // First middleware: spans every request (incl. preflight/static/404/401) and
 // provides the parent context for downstream DB and internal spans.
 app.use(telemetryMiddleware)
+// Correlation IDs + request/outbound-Rayern tracing for Update flow diagnosis.
+app.use(correlationMiddleware)
 
 app.use(
   helmet({

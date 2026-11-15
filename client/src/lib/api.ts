@@ -116,6 +116,7 @@ export interface RequestOptions {
   method?: 'GET' | 'POST' | 'PATCH' | 'DELETE'
   body?: unknown
   signal?: AbortSignal
+  headers?: Record<string, string>
 }
 
 /**
@@ -160,18 +161,27 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   return request
 }
 
+let requestSeq = 0
+function nextCorrelationId(): string {
+  requestSeq = (requestSeq + 1) % 1_000_000
+  return `web-${Date.now().toString(36)}-${requestSeq.toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
 async function executeRequest<T>(
   url: string,
   method: NonNullable<RequestOptions['method']>,
   options: RequestOptions,
   token: string | null,
 ): Promise<T> {
+  const correlationId = options.headers?.['x-correlation-id'] ?? nextCorrelationId()
   const res = await fetch(url, {
     method,
     headers: {
       Accept: 'application/json',
+      'x-correlation-id': correlationId,
       ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(options.headers ?? {}),
     },
     body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
     signal: options.signal,

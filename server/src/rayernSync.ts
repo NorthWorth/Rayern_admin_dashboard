@@ -8,6 +8,7 @@ import {
   recordSyncDiagnostic,
   type SyncDiagnosticOutcome,
 } from './syncDiagnostics'
+import { logOutboundRayern } from './requestContext'
 
 /**
  * Approved aggregate contract for the Rayern pull-sync.
@@ -764,6 +765,7 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
       // original error is rethrown unchanged so failure handling below (and the
       // worker's backoff) behave exactly as before.
       const info = classifyFetchError(fetchErr, config.rayern.timeoutMs)
+      logOutboundRayern({ operation: 'pull-sync', destination: config.rayern.syncEndpoint, method: 'GET', status: null, outcome: info.outcome === 'timeout' ? 'timeout' : 'network_error', error: info.message })
       await recordOutboundFailure({
         outcome: info.outcome,
         status: null,
@@ -782,6 +784,7 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
     lastHttpStatus = res.status
 
     if (!res.ok) {
+      logOutboundRayern({ operation: 'pull-sync', destination: config.rayern.syncEndpoint, method: 'GET', status: res.status, outcome: 'http_error', error: `HTTP ${res.status}` })
       // Capture what Rayern actually said before the body is discarded: the
       // status, a bounded sanitized excerpt, and the headers that explain the
       // failure (Retry-After, Server, X-*) plus the correlation id.
@@ -815,6 +818,7 @@ export async function syncOnce(trigger: 'scheduled' | 'manual' | 'boot'): Promis
       throw httpError(res.status)
     }
 
+    logOutboundRayern({ operation: 'pull-sync', destination: config.rayern.syncEndpoint, method: 'GET', status: res.status, outcome: 'success' })
     let raw: unknown
     try {
       raw = await res.json()
@@ -1016,6 +1020,7 @@ export async function triggerRayernWake(trigger: 'boot' | 'scheduled' | 'manual'
     const timer = setTimeout(() => controller.abort(), config.rayern.triggerTimeoutMs)
     let res: Response
     try {
+      logOutboundRayern({ operation: 'wake-trigger', destination: config.rayern.wakeupEndpoint, method: 'POST', status: null, outcome: 'attempt' })
       res = await fetch(config.rayern.wakeupEndpoint, {
         method: 'POST',
         headers: {
@@ -1027,6 +1032,7 @@ export async function triggerRayernWake(trigger: 'boot' | 'scheduled' | 'manual'
     } catch (fetchErr) {
       clearTimeout(timer)
       const info = classifyFetchError(fetchErr, config.rayern.triggerTimeoutMs)
+      logOutboundRayern({ operation: 'wake-trigger', destination: config.rayern.wakeupEndpoint, method: 'POST', status: null, outcome: info.outcome === 'timeout' ? 'timeout' : 'network_error', error: info.message })
       await recordSyncDiagnostic({
         source: 'trigger',
         endpoint: syncEndpointPathForTrigger(),
@@ -1047,6 +1053,7 @@ export async function triggerRayernWake(trigger: 'boot' | 'scheduled' | 'manual'
 
     const durationMs = Date.now() - startedAt
     if (!res.ok) {
+      logOutboundRayern({ operation: 'wake-trigger', destination: config.rayern.wakeupEndpoint, method: 'POST', status: res.status, outcome: 'http_error', error: `HTTP ${res.status}` })
       const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'))
       if (res.status === 429 && retryAfterSec !== null) {
         triggerRateLimitedUntil = Math.max(triggerRateLimitedUntil, Date.now() + Math.min(retryAfterSec, 3_600_000) * 1000)
@@ -1070,6 +1077,7 @@ export async function triggerRayernWake(trigger: 'boot' | 'scheduled' | 'manual'
       throw httpError(res.status)
     }
 
+    logOutboundRayern({ operation: 'wake-trigger', destination: config.rayern.wakeupEndpoint, method: 'POST', status: res.status, outcome: 'success' })
     console.log(`[dashboard-sync] wake trigger sent (${trigger}) — Rayern will push its snapshot`)
     return { ok: true }
   } catch (err) {

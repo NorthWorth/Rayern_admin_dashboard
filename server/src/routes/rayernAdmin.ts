@@ -27,6 +27,7 @@ import type { Response as ExpressResponse } from 'express'
 import { z } from 'zod'
 import { config, rayernAdminProxyEnabled } from '../config'
 import { requireAuth, requireAdmin } from '../auth'
+import { logOutboundRayern } from '../requestContext'
 
 const router = Router()
 
@@ -92,7 +93,9 @@ async function rayernSessionToken(): Promise<string> {
   if (loginInFlight) return loginInFlight
 
   loginInFlight = (async () => {
-    const res = await fetch(`${config.rayern.apiBaseUrl}/api/v1/auth/login`, {
+    const loginUrl = `${config.rayern.apiBaseUrl}/api/v1/auth/login`
+    logOutboundRayern({ operation: 'admin-login', destination: loginUrl, method: 'POST', status: null, outcome: 'attempt' })
+    const res = await fetch(loginUrl, {
       method: 'POST',
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify({ email: config.rayern.adminEmail, password: config.rayern.adminPassword }),
@@ -107,6 +110,7 @@ async function rayernSessionToken(): Promise<string> {
 
     const token = res.ok ? extractLoginToken(payload) : null
     if (!token) {
+      logOutboundRayern({ operation: 'admin-login', destination: `${config.rayern.apiBaseUrl}/api/v1/auth/login`, method: 'POST', status: res.status, outcome: 'http_error', error: `HTTP ${res.status}` })
       // Honour Retry-After on a rate-limited login so we do not retry into a 429.
       if (res.status === 429) {
         const retryAfterSec = parseRetryAfter(res.headers.get('retry-after'))
@@ -120,6 +124,7 @@ async function rayernSessionToken(): Promise<string> {
       )
     }
 
+    logOutboundRayern({ operation: 'admin-login', destination: `${config.rayern.apiBaseUrl}/api/v1/auth/login`, method: 'POST', status: res.status, outcome: 'success' })
     cachedSession = { token, expiresAt: Date.now() + SESSION_TTL_MS }
     return token
   })()
@@ -150,9 +155,11 @@ async function forwardToRayern(
     )
   }
 
-  const call = async (): Promise<Response> => {
+  const call = async (attempt: number): Promise<Response> => {
     const token = await rayernSessionToken()
-    return fetch(`${config.rayern.apiBaseUrl}${path}`, {
+    const destination = `${config.rayern.apiBaseUrl}${path}`
+    logOutboundRayern({ operation: `admin-proxy:${method} ${path}#${attempt}`, destination, method, status: null, outcome: 'attempt' })
+    const res = await fetch(destination, {
       method,
       headers: {
         Accept: 'application/json',
@@ -161,13 +168,15 @@ async function forwardToRayern(
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     })
+    logOutboundRayern({ operation: `admin-proxy:${method} ${path}#${attempt}`, destination, method, status: res.status, outcome: res.ok ? 'success' : 'http_error', error: res.ok ? null : `HTTP ${res.status}` })
+    return res
   }
 
-  let res = await call()
+  let res = await call(1)
   if (res.status === 401) {
     // Session expired (or was rotated): drop the cached token and retry once.
     cachedSession = null
-    res = await call()
+    res = await call(2)
   }
 
   // Surface an upstream rate limit (including Retry-After) instead of retrying
