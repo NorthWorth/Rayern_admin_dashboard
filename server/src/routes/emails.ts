@@ -267,22 +267,40 @@ router.post('/usage/reconcile', async (_req, res, next) => {
 })
 
 /**
+ * Bulk "select all" recipient scopes. Marketing consent gate promotional mail
+ * only: an operational/service message must still reach opted-out or unverified
+ * accounts.
+ */
+const AudienceQuery = z.object({
+  scope: z.enum(['promotional', 'operational']).default('promotional'),
+})
+
+/**
  * GET /emails/audience — bulk "select all" recipients for an admin-composed
  * email.
  *
  * Reads the SAME synchronized Rayern audience the campaign composer uses, so a
  * free-form send never draws on a second, competing recipient list (the local
- * `accounts` table is not a directory and is empty in production). Only
- * eligible records are returned — opted in AND active AND email verified — plus
- * the newest synchronization time so the composer can show how fresh the list
- * is. `lastSyncedAt` is null when Rayern has never pushed an audience.
+ * `accounts` table is not a directory and is empty in production).
+ *
+ * The scope is chosen by the composer from the email type and defaults to the
+ * strict one:
+ *  - `promotional` — opted in AND active AND email verified (marketing consent).
+ *  - `operational` — every synchronized record; service messages are not
+ *    marketing and must not be limited to opted-in addresses.
+ *
+ * `lastSyncedAt` is the newest synchronization time (null when Rayern has never
+ * pushed an audience) so the composer can show how fresh the mirror is.
  */
-router.get('/audience', async (_req, res, next) => {
+router.get('/audience', async (req, res, next) => {
   try {
+    const { scope } = AudienceQuery.parse(req.query)
+    const where =
+      scope === 'promotional'
+        ? `WHERE consent_opted_in = true AND status = 'active' AND email_verified = true`
+        : ''
     const rows = await query<{ email: string; synced_at: Date | null }>(
-      `SELECT email, synced_at FROM rayern_audience
-       WHERE consent_opted_in = true AND status = 'active' AND email_verified = true
-       ORDER BY email`,
+      `SELECT email, synced_at FROM rayern_audience ${where} ORDER BY email`,
     )
     const lastSyncedAt = rows.reduce<Date | null>((latest, row) => {
       if (!(row.synced_at instanceof Date)) return latest
@@ -292,6 +310,7 @@ router.get('/audience', async (_req, res, next) => {
       count: rows.length,
       recipients: rows.map((r) => r.email),
       lastSyncedAt: lastSyncedAt ? lastSyncedAt.toISOString() : null,
+      scope,
     })
   } catch (err) {
     next(err)

@@ -30,7 +30,12 @@ vi.mock('../services/system', () => ({
 }))
 
 vi.mock('../services/emails', () => ({
-  emailsService: { list: vi.fn(), stats: vi.fn(), send: vi.fn() },
+  emailsService: { list: vi.fn(), stats: vi.fn(), send: vi.fn(), audience: vi.fn() },
+  audienceScopeFor: () => 'promotional',
+  AUDIENCE_SCOPE_RULE: {
+    promotional: 'Recipient scope: promotional — opted in, active and email verified only.',
+    operational: 'Recipient scope: operational — every synchronized recipient.',
+  },
 }))
 
 import { rayernService } from '../services/rayern'

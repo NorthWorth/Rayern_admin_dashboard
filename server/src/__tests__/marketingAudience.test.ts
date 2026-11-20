@@ -41,7 +41,11 @@ function record(email: string, overrides: Partial<AudienceRecordInput> = {}): Au
 }
 
 /** Invokes a GET handler from an Express router directly (routes are plain handlers). */
-async function invokeGet(router: { stack: unknown[] }, path: string): Promise<{ status: number; body: any }> {
+async function invokeGet(
+  router: { stack: unknown[] },
+  path: string,
+  query: Record<string, unknown> = {},
+): Promise<{ status: number; body: any }> {
   const layer = (router.stack as any[]).find((l) => l.route?.path === path && l.route.methods?.get)
   if (!layer) throw new Error(`GET ${path} is not registered`)
   const handler = layer.route.stack[0].handle
@@ -57,7 +61,7 @@ async function invokeGet(router: { stack: unknown[] }, path: string): Promise<{ 
       return this
     },
   }
-  await handler({} as any, res as any, (err: unknown) => {
+  await handler({ query } as any, res as any, (err: unknown) => {
     throw err instanceof Error ? err : new Error(String(err))
   })
   return { status, body }
@@ -203,27 +207,41 @@ describe('local audience API', () => {
 })
 
 describe('bulk email recipients', () => {
-  it('reads the synchronized audience (eligible only) and reports its freshness', async () => {
+  it('scopes recipients by email type: promotional is consent-gated, operational is broader', async () => {
     const { ingestRayernAudience } = await import('../rayernAudienceIngestion')
     await ingestRayernAudience({
       syncId: 'aud-email',
       complete: true,
       audience: [
         record('bulk-eligible@example.com'),
-        record('bulk-suspended@example.com', { status: 'suspended' }),
         record('bulk-unverified@example.com', { emailVerified: false }),
         record('bulk-optedout@example.com', { marketingConsent: { optedIn: false, source: 'settings' } }),
       ],
     })
 
     const router = (await import('../routes/emails')).default
-    const { status, body } = await invokeGet(router as unknown as { stack: unknown[] }, '/audience')
+    const stack = router as unknown as { stack: unknown[] }
 
-    expect(status).toBe(200)
-    expect(body.recipients).toEqual(['bulk-eligible@example.com'])
-    expect(body.count).toBe(1)
+    // Default scope is the strict marketing one.
+    const promotional = await invokeGet(stack, '/audience')
+    expect(promotional.status).toBe(200)
+    expect(promotional.body.recipients).toEqual(['bulk-eligible@example.com'])
+    expect(promotional.body.count).toBe(1)
+    expect(promotional.body.scope).toBe('promotional')
     // The composer shows this so a stale mirror is never presented as current.
-    expect(typeof body.lastSyncedAt).toBe('string')
+    expect(typeof promotional.body.lastSyncedAt).toBe('string')
+
+    // Operational mail is not marketing: opted-out and unverified accounts stay
+    // reachable.
+    const operational = await invokeGet(stack, '/audience', { scope: 'operational' })
+    expect(operational.status).toBe(200)
+    expect(operational.body.scope).toBe('operational')
+    expect(operational.body.recipients).toEqual([
+      'bulk-eligible@example.com',
+      'bulk-optedout@example.com',
+      'bulk-unverified@example.com',
+    ])
+    expect(operational.body.count).toBe(3)
   })
 })
 

@@ -11,7 +11,7 @@ import { VolumeBarChart } from '../components/charts'
 import { useToast } from '../components/ui/Toast'
 import { useQuery } from '../hooks/useQuery'
 import { usePageRefresh } from '../hooks/usePageRefresh'
-import { emailsService } from '../services/emails'
+import { AUDIENCE_SCOPE_RULE, audienceScopeFor, emailsService, type AudienceScope } from '../services/emails'
 import { rayernService } from '../services/rayern'
 import { CampaignComposer } from '../components/CampaignComposer'
 import { AudienceFreshness } from '../components/AudienceFreshness'
@@ -229,7 +229,12 @@ export function EmailComposer({ open, copyId, onClose, onSent }: { open: boolean
 
   const [audienceCount, setAudienceCount] = useState<number | null>(null)
   const [audienceSyncedAt, setAudienceSyncedAt] = useState<string | null>(null)
+  const [audienceScopeLoaded, setAudienceScopeLoaded] = useState<AudienceScope | null>(null)
   const [loadingAudience, setLoadingAudience] = useState(false)
+
+  // Marketing consent gates promotional mail only; service messages keep the
+  // broader synchronized audience.
+  const audienceScope = audienceScopeFor(type)
 
   const toInvalid = to.length === 0
   const subjectInvalid = subject.trim().length === 0
@@ -260,9 +265,10 @@ export function EmailComposer({ open, copyId, onClose, onSent }: { open: boolean
   const loadAudience = async (): Promise<void> => {
     setLoadingAudience(true)
     try {
-      const { count, recipients, lastSyncedAt } = await emailsService.audience()
+      const { count, recipients, lastSyncedAt, scope } = await emailsService.audience(audienceScope)
       setAudienceCount(count)
       setAudienceSyncedAt(lastSyncedAt)
+      setAudienceScopeLoaded(scope)
       setTo(recipients)
     } catch {
       showToast('error', 'Could not load the recipient audience.')
@@ -271,8 +277,17 @@ export function EmailComposer({ open, copyId, onClose, onSent }: { open: boolean
     }
   }
 
+  // The loaded recipient list belongs to the scope it was fetched for: changing
+  // the email type invalidates it, so the displayed rule always describes the
+  // recipients actually loaded.
+  useEffect(() => {
+    setAudienceCount(null)
+    setAudienceSyncedAt(null)
+    setAudienceScopeLoaded(null)
+  }, [audienceScope])
+
   const reset = (): void => {
-    setTo([]); setCc([]); setBcc([]); setSubject(''); setMessage(''); setSendError(null); setAudienceCount(null); setAudienceSyncedAt(null)
+    setTo([]); setCc([]); setBcc([]); setSubject(''); setMessage(''); setSendError(null); setAudienceCount(null); setAudienceSyncedAt(null); setAudienceScopeLoaded(null)
   }
 
   const handleSend = async (): Promise<void> => {
@@ -319,9 +334,12 @@ export function EmailComposer({ open, copyId, onClose, onSent }: { open: boolean
                 {loadingAudience ? 'Loading audience…' : 'Select all recipients'}
               </button>
               {audienceCount !== null ? (
-                <span className="text-[11px] text-ink-400">{audienceCount} eligible emails filled</span>
+                <span className="text-[11px] text-ink-400">{audienceCount} recipients filled</span>
               ) : null}
             </div>
+            <p className="text-[11px] text-ink-500">
+              {AUDIENCE_SCOPE_RULE[audienceScopeLoaded ?? audienceScope]}
+            </p>
             {audienceCount !== null ? <AudienceFreshness lastSyncedAt={audienceSyncedAt} /> : null}
           </div>
         </Field>

@@ -9,6 +9,32 @@ function delay<T>(value: T, ms = 240): Promise<T> {
 }
 
 /**
+ * Who a bulk 'select all' may reach. Marketing consent gates PROMOTIONAL mail
+ * only; operational/service messages must still reach opted-out or unverified
+ * accounts, so they get the broader synchronized set.
+ */
+export type AudienceScope = 'promotional' | 'operational'
+
+export interface AudienceRecipients {
+  count: number
+  recipients: string[]
+  lastSyncedAt: string | null
+  scope: AudienceScope
+}
+
+/** The scope the composer must use for a given email type. */
+export function audienceScopeFor(type: EmailType): AudienceScope {
+  return type === 'promotion' ? 'promotional' : 'operational'
+}
+
+/** The rule in effect, shown next to the audience freshness note. */
+export const AUDIENCE_SCOPE_RULE: Record<AudienceScope, string> = {
+  promotional: 'Recipient scope: promotional — opted in, active and email verified only.',
+  operational:
+    'Recipient scope: operational — every synchronized recipient, including opted-out and unverified accounts.',
+}
+
+/**
  * Email domain service. The browser never talks to Resend — composing an email
  * posts to the dashboard backend, which performs the actual send via Resend.
  * DEFAULT_FROM is only a display default; the backend validates/enforces it.
@@ -26,11 +52,12 @@ export const emailsService = {
 
   /**
    * Bulk "select all" recipients: the same synchronized Rayern audience the
-   * campaign composer reads, eligible-only, with its newest sync time.
+   * campaign composer reads, scoped by the email type, with its newest sync
+   * time.
    */
-  audience(): Promise<{ count: number; recipients: string[]; lastSyncedAt: string | null }> {
-    if (USE_DEMO_DATA) return delay({ count: 0, recipients: [], lastSyncedAt: null })
-    return apiRequest<{ count: number; recipients: string[]; lastSyncedAt: string | null }>('/emails/audience')
+  audience(scope: AudienceScope): Promise<AudienceRecipients> {
+    if (USE_DEMO_DATA) return delay({ count: 0, recipients: [], lastSyncedAt: null, scope })
+    return apiRequest<AudienceRecipients>(`/emails/audience?scope=${scope}`)
   },
 
   /** Content of a past email for "copy as new email" (never auto-sends). */
