@@ -1,5 +1,6 @@
 import { z } from 'zod'
-import { query } from './db'
+import { config } from './config'
+import { query, db, withTransaction, type SqlExecutor } from './db'
 import {
   SyncPayload,
   storePayload,
@@ -28,6 +29,11 @@ export interface IngestionResult {
   sections?: string[]
   error?: string
   status?: number
+  /**
+   * Non-blocking validation diagnostics (e.g. a configured currency
+   * expectation that does not match the payload). Never silently dropped.
+   */
+  warnings?: string[]
 }
 
 const SnapshotPayload = SyncPayload.extend({
@@ -63,8 +69,8 @@ async function readIngestionStatusRow(): Promise<{
   }
 }
 
-async function markIngestionSuccess(snapshotId: string): Promise<void> {
-  await query(
+async function markIngestionSuccess(snapshotId: string, exec: SqlExecutor = db): Promise<void> {
+  await exec.query(
     `INSERT INTO rayern_ingestion_status (id, last_snapshot_id, last_received_at, last_success_at, last_failure_at, last_error, consecutive_failures, enabled, updated_at)
      VALUES (1, $1, now(), now(), NULL, NULL, 0, true, now())
      ON CONFLICT (id) DO UPDATE SET
@@ -79,7 +85,7 @@ async function markIngestionSuccess(snapshotId: string): Promise<void> {
     [snapshotId],
   )
   // Push delivery moves the canonical "last successful sync" metadata too.
-  await markPushSyncSuccess()
+  await markPushSyncSuccess(exec)
 }
 
 async function markIngestionFailure(error: string): Promise<void> {
@@ -104,8 +110,15 @@ async function snapshotExists(snapshotId: string): Promise<boolean> {
   return rows.length > 0
 }
 
-async function recordSnapshot(snapshotId: string, payload: unknown, status: 'success' | 'failed', error?: string, generatedAt?: string): Promise<void> {
-  await query(
+async function recordSnapshot(
+  snapshotId: string,
+  payload: unknown,
+  status: 'success' | 'failed',
+  error?: string,
+  generatedAt?: string,
+  exec: SqlExecutor = db,
+): Promise<void> {
+  await exec.query(
     `INSERT INTO rayern_snapshots (snapshot_id, received_at, payload, status, error, generated_at)
      VALUES ($1, now(), $2, $3, $4, $5)
      ON CONFLICT (snapshot_id) DO UPDATE SET
@@ -179,24 +192,44 @@ export async function ingestRayernSnapshot(raw: unknown): Promise<IngestionResul
     }
   }
 
+  // Non-blocking currency diagnostic: the dashboard never converts amounts and
+  // accepts whatever ISO code Rayern reports, but a configured expectation that
+  // does not match is surfaced instead of being silently ignored.
+  const warnings: string[] = []
+  if (
+    data.billing &&
+    config.billing.expectedCurrency &&
+    data.billing.currency !== config.billing.expectedCurrency
+  ) {
+    warnings.push(
+      `Currency mismatch: Rayern reported ${data.billing.currency} but the dashboard expects ${config.billing.expectedCurrency} (RAYERN_BILLING_CURRENCY). Values were stored unchanged and NOT converted.`,
+    )
+    console.warn(`[rayern-ingestion] ${warnings[warnings.length - 1]}`)
+  }
+
   try {
-    const sections = await storePayload(data as unknown as SyncPayloadData)
     const { blocks, present, rejected } = extractInstrumentation(unwrapped.value)
     if (rejected.length > 0) {
       console.log(`[rayern-ingestion] instrumentation block(s) dropped: ${rejected.join(',')}`)
     }
-    let instrumentationSections: string[] = []
-    if (present.length > 0) {
-      try {
-        instrumentationSections = await storeInstrumentation(blocks)
-      } catch (storeErr) {
-        console.error('[rayern-ingestion] failed to persist instrumentation blocks:', storeErr)
+
+    // One transaction: sections, instrumentation blocks, the snapshot record and
+    // the success bookkeeping all commit together, or none of them do. A
+    // half-written update can never be presented as one consistent snapshot.
+    const sections = await withTransaction(async (tx) => {
+      const written = await storePayload(data as unknown as SyncPayloadData, tx)
+      if (present.length > 0) {
+        written.push(...(await storeInstrumentation(blocks, tx)))
       }
-    }
-    sections.push(...instrumentationSections)
+      await recordSnapshot(snapshotId, unwrapped.value, 'success', undefined, data.generatedAt, tx)
+      await markIngestionSuccess(snapshotId, tx)
+      return written
+    })
 
     // Optional logs cache in snapshot payload (push-based). Ordinary dashboard
     // refresh reads cached logs from the local DB and never contacts Rayern.
+    // Deliberately outside the transaction: a log-cache problem must not roll
+    // back an otherwise complete snapshot.
     try {
       const raw = unwrapped.value as Record<string, unknown>
       const logsValue = raw.logs ?? raw.serverLogs ?? raw.logEntries
@@ -217,13 +250,13 @@ export async function ingestRayernSnapshot(raw: unknown): Promise<IngestionResul
       console.error('[rayern-ingestion] failed to cache logs from snapshot:', logErr)
     }
 
-    await recordSnapshot(snapshotId, unwrapped.value, 'success', undefined, data.generatedAt)
-    await markIngestionSuccess(snapshotId)
-
     console.log(`[rayern-ingestion] snapshot ${snapshotId} persisted: sections=${sections.join(',') || 'none'}`)
-    return { ok: true, snapshotId, sections }
+    return { ok: true, snapshotId, sections, ...(warnings.length > 0 ? { warnings } : {}) }
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown ingestion error'
+    // Operational signal: a rejected snapshot is logged without any payload
+    // content or credentials so the failure can be diagnosed from the service log.
+    console.error(`[rayern-ingestion] snapshot ${snapshotId} failed: ${msg}`)
     try {
       await recordSnapshot(snapshotId, unwrapped.value, 'failed', msg, data.generatedAt)
       await markIngestionFailure(msg)

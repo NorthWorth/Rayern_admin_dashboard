@@ -26,7 +26,7 @@ vi.mock('../services/rayern', () => ({
 }))
 
 vi.mock('../services/system', () => ({
-  systemService: { overview: vi.fn() },
+  systemService: { overview: vi.fn(), scheduler: vi.fn() },
 }))
 
 vi.mock('../services/emails', () => ({
@@ -95,6 +95,15 @@ function renderPage(ui: ReactNode): void {
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(systemService.overview).mockResolvedValue(SYSTEM_OVERVIEW as never)
+  // Scheduler status is a separate service; default to "not configured" so the
+  // existing System assertions are unaffected.
+  vi.mocked(systemService.scheduler).mockResolvedValue({
+    configured: false,
+    reachable: false,
+    reason: 'not configured in this test',
+    checkedAt: new Date().toISOString(),
+    status: null,
+  } as never)
   vi.mocked(emailsService.list).mockResolvedValue([])
   vi.mocked(emailsService.stats).mockResolvedValue({
     totalSent: 0,

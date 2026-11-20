@@ -70,6 +70,7 @@ describe('rayern audience ingestion', () => {
 
     const result = await ingestRayernAudience({
       syncId: 'aud-1',
+      complete: true,
       audience: [
         record('alice@example.com', { workspacePlan: 'pro', subscription: { plan: 'pro', status: 'active', hasPaidAccess: true } }),
         record('bob@example.com', { status: 'suspended' }),
@@ -97,6 +98,7 @@ describe('rayern audience ingestion', () => {
 
     await ingestRayernAudience({
       syncId: 'aud-2',
+      complete: true,
       audience: [
         record('alice@example.com', {
           status: 'suspended',
@@ -116,20 +118,34 @@ describe('rayern audience ingestion', () => {
     expect(alice[0].consentSource).toBe('unsubscribe_link')
   })
 
-  it('cleans up records absent from a complete snapshot and clears on an empty one', async () => {
+  it('prunes records absent from a COMPLETE snapshot only, and refuses to clear on an empty one', async () => {
     const { ingestRayernAudience, listAudience } = await import('../rayernAudienceIngestion')
+
+    // A delta (no `complete`) upserts without deleting anything.
+    const delta = await ingestRayernAudience({
+      syncId: 'aud-delta',
+      audience: [record('delta@example.com')],
+    })
+    expect(delta.ok).toBe(true)
+    expect(delta.pruned).toBe(false)
+    expect(delta.removed).toBe(0)
+    expect((await listAudience()).map((r) => r.email).sort()).toEqual(['alice@example.com', 'bob@example.com', 'delta@example.com'])
 
     const cleanup = await ingestRayernAudience({
       syncId: 'aud-3',
+      complete: true,
       audience: [record('bob@example.com')],
     })
-    expect(cleanup.removed).toBe(1)
+    expect(cleanup.pruned).toBe(true)
+    expect(cleanup.removed).toBe(2)
     expect((await listAudience()).map((r) => r.email)).toEqual(['bob@example.com'])
 
+    // An empty payload cannot prove that nobody is mailable: it is rejected and
+    // the stored audience survives untouched (previously it wiped the table).
     const cleared = await ingestRayernAudience({ syncId: 'aud-4', audience: [] })
-    expect(cleared.ok).toBe(true)
-    expect(cleared.removed).toBe(1)
-    expect(await listAudience()).toEqual([])
+    expect(cleared.ok).toBe(false)
+    expect(cleared.status).toBe(400)
+    expect((await listAudience()).map((r) => r.email)).toEqual(['bob@example.com'])
   })
 
   it('rejects an invalid payload without writing or advancing success metadata', async () => {
@@ -151,6 +167,7 @@ describe('local audience API', () => {
     const { ingestRayernAudience } = await import('../rayernAudienceIngestion')
     await ingestRayernAudience({
       syncId: 'aud-api',
+      complete: true,
       audience: [
         record('alice@example.com', { workspacePlan: 'pro', subscription: { plan: 'pro', status: 'active' } }),
         record('bob@example.com', { status: 'suspended' }),
@@ -171,9 +188,11 @@ describe('local audience API', () => {
     expect(body.lastSyncedAt).not.toBeNull()
   })
 
-  it('returns an honest empty state before any sync', async () => {
-    const { ingestRayernAudience } = await import('../rayernAudienceIngestion')
-    await ingestRayernAudience({ syncId: 'aud-empty', audience: [] })
+  it('returns an honest empty state when nothing has ever been synced', async () => {
+    // Cleared explicitly: an empty push payload is rejected by design, so a
+    // test may not use ingestion as a truncate.
+    const { query } = await import('../db')
+    await query('DELETE FROM rayern_audience')
 
     const router = (await import('../routes/marketing')).default
     const { body } = await invokeGet(router as unknown as { stack: unknown[] }, '/audience')
@@ -183,11 +202,37 @@ describe('local audience API', () => {
   })
 })
 
+describe('bulk email recipients', () => {
+  it('reads the synchronized audience (eligible only) and reports its freshness', async () => {
+    const { ingestRayernAudience } = await import('../rayernAudienceIngestion')
+    await ingestRayernAudience({
+      syncId: 'aud-email',
+      complete: true,
+      audience: [
+        record('bulk-eligible@example.com'),
+        record('bulk-suspended@example.com', { status: 'suspended' }),
+        record('bulk-unverified@example.com', { emailVerified: false }),
+        record('bulk-optedout@example.com', { marketingConsent: { optedIn: false, source: 'settings' } }),
+      ],
+    })
+
+    const router = (await import('../routes/emails')).default
+    const { status, body } = await invokeGet(router as unknown as { stack: unknown[] }, '/audience')
+
+    expect(status).toBe(200)
+    expect(body.recipients).toEqual(['bulk-eligible@example.com'])
+    expect(body.count).toBe(1)
+    // The composer shows this so a stale mirror is never presented as current.
+    expect(typeof body.lastSyncedAt).toBe('string')
+  })
+})
+
 describe('audience eligibility', () => {
   it('computes eligible/excluded counts and per-record exclusion reasons', async () => {
     const { ingestRayernAudience } = await import('../rayernAudienceIngestion')
     await ingestRayernAudience({
       syncId: 'aud-eligibility',
+      complete: true,
       audience: [
         record('eligible@example.com'),
         record('suspended@example.com', { status: 'suspended' }),

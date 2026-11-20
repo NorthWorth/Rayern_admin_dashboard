@@ -24,10 +24,13 @@ export const emailsService = {
     return apiRequest<EmailStats>('/emails/stats')
   },
 
-  /** Recipients available for bulk "select all" (account emails only). */
-  audience(verification: 'verified' | 'unverified' | 'all' = 'all'): Promise<{ count: number; recipients: string[] }> {
-    if (USE_DEMO_DATA) return delay({ count: 0, recipients: [] })
-    return apiRequest<{ count: number; recipients: string[] }>(`/emails/audience?verification=${verification}`)
+  /**
+   * Bulk "select all" recipients: the same synchronized Rayern audience the
+   * campaign composer reads, eligible-only, with its newest sync time.
+   */
+  audience(): Promise<{ count: number; recipients: string[]; lastSyncedAt: string | null }> {
+    if (USE_DEMO_DATA) return delay({ count: 0, recipients: [], lastSyncedAt: null })
+    return apiRequest<{ count: number; recipients: string[]; lastSyncedAt: string | null }>('/emails/audience')
   },
 
   /** Content of a past email for "copy as new email" (never auto-sends). */

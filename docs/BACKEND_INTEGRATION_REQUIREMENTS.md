@@ -348,7 +348,7 @@ Request: `{ feedbackType, message, workspaceName? }`
 `feedbackType ∈ {"General feedback","Feature request","Bug report","Something is confusing"}`; `message` trimmed, 1–5000 chars.
 Responses: `200 {success,data:{message:"Thanks — your feedback has been sent."}}` · `400 INVALID_FEEDBACK_TYPE | MESSAGE_REQUIRED | MESSAGE_TOO_LONG` · `502 EMAIL_DELIVERY_FAILED` · `503 EMAIL_NOT_CONFIGURED`.
 
-**Nothing is stored.** There is no Feedback collection, no admin retrieval, no pagination, no category normalization (free enum strings), no reviewed/resolved state, no unreviewed count. The dashboard's Feedback page therefore renders an UnavailablePanel with this exact requirement (verified in `client/src/pages/Feedback.tsx`).
+**Update (2026-11-20, verified against Rayern `main`):** persistence now exists. `src/models/feedback.js` stores a Feedback document and `src/routes/adminRoutes.js` registers `GET /api/v1/admin/feedback/summary`, `GET /api/v1/admin/feedback` and `PATCH /api/v1/admin/feedback/:id`, all behind `requireAuth` + `requireAdmin`. `POST /feedback` keeps its response contract and now persists (deduplicated against an identical submission from the same user inside 10 minutes) before notifying by EmailJS. The dashboard's Feedback page is a live review queue (`client/src/pages/Feedback.tsx`, `client/src/services/feedback.ts`).
 
 ### 6.2 Proposed — [P] (Rayern-side, admin-only)
 
@@ -392,7 +392,13 @@ GET    /api/v1/admin/feedback/summary [P] requireAuth+requireAdmin
   "lastSubmittedAt": "…Z" } }
 ```
 
-**Dashboard-side work:** new `GET /feedback`, `PATCH /feedback/:id`, `GET /feedback/summary` passthroughs in `rayernAdmin.ts` (reusing the proxy session), a `feedbackService`, and replacing the Feedback UnavailablePanel with the list/summary UI (pagination + category/status filters + mark-reviewed action with confirmation). Consent/authorization remain Rayern's.
+**Implemented (dashboard side):** `GET /admin/feedback`, `GET /admin/feedback/summary` and `PATCH /admin/feedback/:id` passthroughs in `server/src/routes/rayernAdmin.ts` (reusing the proxy session, `requireAuth` + `requireAdmin`, upstream status and envelope relayed verbatim), the `feedbackService` client, and the list/summary/detail UI with category + status filters, pagination and supported status transitions. The status route writes an audit event containing the record id and the new status only — never the message or category — because audit rows are searchable and exportable.
+
+**Response shapes actually emitted by Rayern (not the proposal above):** the list returns `data.feedback` (array), `data.pagination = { page, limit, totalResults, totalPages, hasNextPage }` and `data.filters = { category, status, sort }`; the summary returns `data = { total, byStatus: { open, reviewed, resolved }, byCategory: { <category>: count }, lastSubmittedAt }`. Each record is `{ id, category, message, status, source, createdAt, updatedAt, reviewedAt, workspaceId, user: { id, email } | null }`.
+
+**Not supported upstream:** free-text search over feedback (only `category`, `status` and `sort=<field>:<dir>`), and editing a record's category. The dashboard offers neither, rather than faking them client-side.
+
+**Audience snapshot safety (dashboard ingestion):** `POST /internal/dashboard/rayern-audience` now requires a non-empty `audience` array and prunes rows absent from the payload only when the producer sets `complete: true`. A delta or partial payload therefore upserts without deleting anyone, and an empty payload is rejected with `400` (previously it truncated `rayern_audience`). Eligibility stays authoritative upstream and is re-checked at send time. Both audience surfaces — the campaign composer and the email composer's "select all" — read this one synchronized list (the old `/emails/audience` query over the local `accounts` table is gone), and both display the newest synchronization time plus a stale-snapshot warning, because removals only land with a complete snapshot.
 
 ---
 

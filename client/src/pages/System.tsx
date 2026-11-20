@@ -24,6 +24,7 @@ import type {
   DependencyConfigBlock,
   HealthStatus,
   RayernSyncStatus,
+  SchedulerStatusResponse,
   SyncDiagnostic,
   SyncDiagnosticsResponse,
   SyntheticMonitoringBlock,
@@ -42,7 +43,9 @@ export function SystemPage() {
   // Failures this backend hit while calling Rayern — captured at the outbound
   // HTTP layer, which is the only place a server-to-server failure is visible.
   const diagnosticsQ = useQuery(() => rayernService.syncDiagnostics(50))
-  usePageRefresh([q, blocksQ, syntheticQ, diagnosticsQ])
+  // Independent scheduler status, proxied server-side (no browser credential).
+  const schedulerQ = useQuery(() => systemService.scheduler())
+  usePageRefresh([q, blocksQ, syntheticQ, diagnosticsQ, schedulerQ])
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6">
@@ -58,6 +61,13 @@ export function SystemPage() {
       </div>
 
       <SyncStatusCard sync={q.data?.sync} loading={q.loading} error={q.error} onRetry={q.refetch} />
+
+      <SchedulerCard
+        data={schedulerQ.data ?? undefined}
+        loading={schedulerQ.loading}
+        error={schedulerQ.error}
+        onRetry={schedulerQ.refetch}
+      />
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <DependencyConfigCard
@@ -519,7 +529,7 @@ function SyncStatusCard({
     <Card>
       <CardHeader
         title="Rayern synchronization"
-        subtitle="Approved aggregates and the marketing audience arrive from Rayern by scheduled pull or by push; the newest successful transport is shown below"
+        subtitle="Rayern generates aggregate snapshots and pushes them here; this dashboard stores and serves them. The transport actually configured is shown below."
       />
       <CardBody>
         {loading ? (
@@ -530,10 +540,10 @@ function SyncStatusCard({
           <p className="text-sm text-ink-500">Sync status unavailable.</p>
         ) : !sync.enabled ? (
           <p className="text-sm text-ink-500">
-            Synchronization is not configured yet. Set <code className="rounded bg-ink-100 px-1 text-xs">RAYERN_SYNC_ENDPOINT</code> and
-            <code className="ml-1 rounded bg-ink-100 px-1 text-xs">RAYERN_MONITORING_TOKEN</code> on the dashboard backend to enable
-            periodic pulls of approved aggregate data.
-        </p>
+            No snapshot transport is configured. Set <code className="rounded bg-ink-100 px-1 text-xs">RAYERN_SNAPSHOT_TOKEN</code> to accept
+            pushed snapshots, <code className="ml-1 rounded bg-ink-100 px-1 text-xs">RAYERN_WAKEUP_ENDPOINT</code> so the external scheduler can
+            wake Rayern, or <code className="rounded bg-ink-100 px-1 text-xs">RAYERN_SYNC_ENDPOINT</code> for the legacy pull fallback.
+          </p>
         ) : (
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
             <StatusBadge tone={sync.status === 'healthy' ? 'green' : sync.status === 'degraded' ? 'amber' : 'red'}>
@@ -554,6 +564,154 @@ function SyncStatusCard({
             ) : null}
             {sync.stale ? <span className="font-medium text-amber-600">Data may be stale</span> : null}
             {sync.lastError ? <span className="w-full truncate text-xs text-red-600" title={sync.lastError}>Last error: {sync.lastError}</span> : null}
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  )
+}
+
+/**
+ * Independent scheduler status.
+ *
+ * The scheduler is a separate service: it wakes Rayern on a fixed cadence and
+ * owns its own execution history. `configured` / `reachable` / `status` are
+ * three distinct states, so an absent scheduler is never shown as healthy.
+ * An edge challenge is called out explicitly — it is not a successful wake.
+ */
+function SchedulerCard({
+  data,
+  loading,
+  error,
+  onRetry,
+}: {
+  data: SchedulerStatusResponse | undefined
+  loading: boolean
+  error: string | null
+  onRetry: () => void
+}) {
+  const status = data?.status ?? null
+  const stateTone =
+    !data || !data.configured || !data.reachable
+      ? 'amber'
+      : status?.edgeChallenge
+        ? 'red'
+        : status?.state === 'ok'
+          ? 'green'
+          : status?.state === 'failing'
+            ? 'red'
+            : 'amber'
+
+  return (
+    <Card>
+      <CardHeader
+        title="Snapshot scheduler"
+        subtitle="Independent service that wakes Rayern every interval; it stores no customer data and generates no snapshots itself"
+        actions={
+          data?.configured ? (
+            <StatusBadge tone={stateTone}>{titleCase(status?.state ?? (data.reachable ? 'unknown' : 'unreachable'))}</StatusBadge>
+          ) : (
+            <StatusBadge tone="amber">Not configured</StatusBadge>
+          )
+        }
+      />
+      <CardBody>
+        {loading ? (
+          <LoadingBlock rows={2} />
+        ) : error ? (
+          <ErrorState message={error} onRetry={onRetry} />
+        ) : !data || !data.configured ? (
+          <p className="text-sm text-ink-500">
+            {data?.reason ?? 'The external scheduler is not configured for this deployment.'} The dashboard cannot confirm the
+            wake schedule; snapshot freshness above remains the authoritative signal.
+          </p>
+        ) : !data.reachable || !status ? (
+          <p className="text-sm text-amber-700">{data.reason ?? 'Scheduler status is unavailable.'}</p>
+        ) : (
+          <div className="space-y-4">
+            {status.edgeChallenge ? (
+              <p className="rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-sm text-red-800">
+                The scheduler is paused: Rayern's edge answered the wake request with a browser human-verification challenge.
+                That is not a successful wake and cannot be solved by a server. Resolve it with the hosting provider, then
+                restart the scheduler.
+              </p>
+            ) : null}
+            <dl className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm sm:grid-cols-4">
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-ink-400">Cadence</dt>
+                <dd className="mt-0.5 font-medium text-ink-800">
+                  {status.intervalMs ? `${Math.round(status.intervalMs / 60_000)}m` : '—'}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-ink-400">Last attempt</dt>
+                <dd className="mt-0.5 font-medium text-ink-800">{status.lastAttemptAt ? timeAgo(status.lastAttemptAt) : 'never'}</dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-ink-400">Last success</dt>
+                <dd className="mt-0.5 font-medium text-ink-800">{status.lastSuccessAt ? timeAgo(status.lastSuccessAt) : 'never'}</dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-ink-400">Next scheduled</dt>
+                <dd className="mt-0.5 font-medium text-ink-800">
+                  {status.nextScheduledAt ? formatDateTime(status.nextScheduledAt) : 'paused'}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-ink-400">Last outcome</dt>
+                <dd className="mt-0.5 font-medium text-ink-800">
+                  {status.lastOutcome ? titleCase(status.lastOutcome) : '—'}
+                  {status.lastHttpStatus !== null ? ` · HTTP ${status.lastHttpStatus}` : ''}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-ink-400">Consecutive failures</dt>
+                <dd className="mt-0.5 font-medium text-ink-800">{status.consecutiveFailures ?? 0}</dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-ink-400">Last error category</dt>
+                <dd className="mt-0.5 font-medium text-ink-800">{status.lastErrorCategory ?? '—'}</dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-ink-400">Reached Rayern app</dt>
+                <dd className="mt-0.5 font-medium text-ink-800">
+                  {status.reachedApplication === null ? 'unknown' : status.reachedApplication ? 'yes' : 'no'}
+                </dd>
+              </div>
+            </dl>
+
+            {status.history.length > 0 ? (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-ink-200 text-left text-[11px] font-semibold uppercase tracking-wide text-ink-500">
+                      <th scope="col" className="px-2 py-2">Started</th>
+                      <th scope="col" className="px-2 py-2">Trigger</th>
+                      <th scope="col" className="px-2 py-2">Outcome</th>
+                      <th scope="col" className="px-2 py-2">HTTP</th>
+                      <th scope="col" className="px-2 py-2">Attempts</th>
+                      <th scope="col" className="px-2 py-2">Detail</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {status.history.slice(0, 6).map((entry, index) => (
+                      <tr key={entry.id ?? index} className="border-b border-ink-100 last:border-0">
+                        <td className="whitespace-nowrap px-2 py-2 text-ink-600">
+                          {entry.startedAt ? formatDateTime(entry.startedAt) : '—'}
+                        </td>
+                        <td className="px-2 py-2 text-ink-700">{entry.trigger ?? '—'}</td>
+                        <td className="px-2 py-2 font-medium text-ink-800">{entry.outcome ?? '—'}</td>
+                        <td className="px-2 py-2 text-ink-700">{entry.httpStatus ?? '—'}</td>
+                        <td className="px-2 py-2 text-ink-700">{entry.attempts ?? '—'}</td>
+                        <td className="max-w-[22rem] truncate px-2 py-2 text-xs text-ink-600" title={entry.message ?? ''}>
+                          {entry.message ?? '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
           </div>
         )}
       </CardBody>

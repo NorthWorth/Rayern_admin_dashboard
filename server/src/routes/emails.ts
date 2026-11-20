@@ -267,37 +267,32 @@ router.post('/usage/reconcile', async (_req, res, next) => {
 })
 
 /**
- * GET /emails/audience — admin-selectable recipients for bulk "select all".
- * Returns account emails ONLY (never workspace content). Supports the same
- * filters as the Users page so the admin can target verified users, etc.
+ * GET /emails/audience — bulk "select all" recipients for an admin-composed
+ * email.
+ *
+ * Reads the SAME synchronized Rayern audience the campaign composer uses, so a
+ * free-form send never draws on a second, competing recipient list (the local
+ * `accounts` table is not a directory and is empty in production). Only
+ * eligible records are returned — opted in AND active AND email verified — plus
+ * the newest synchronization time so the composer can show how fresh the list
+ * is. `lastSyncedAt` is null when Rayern has never pushed an audience.
  */
-router.get('/audience', async (req, res, next) => {
+router.get('/audience', async (_req, res, next) => {
   try {
-    const q = z
-      .object({
-        verification: z.enum(['verified', 'unverified', 'all']).default('all'),
-        status: z.enum(['active', 'all']).default('active'),
-        limit: z.coerce.number().int().min(1).max(500).default(500),
-      })
-      .parse(req.query)
-
-    const conditions: string[] = []
-    const params: unknown[] = []
-    if (q.verification !== 'all') {
-      params.push(q.verification)
-      conditions.push(`verification = $${params.length}`)
-    }
-    if (q.status !== 'all') {
-      params.push(q.status)
-      conditions.push(`status = $${params.length}`)
-    }
-    const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
-
-    const rows = await query<{ email: string; name: string }>(
-      `SELECT email, name FROM accounts ${where} ORDER BY created_at DESC LIMIT ${q.limit}`,
-      params,
+    const rows = await query<{ email: string; synced_at: Date | null }>(
+      `SELECT email, synced_at FROM rayern_audience
+       WHERE consent_opted_in = true AND status = 'active' AND email_verified = true
+       ORDER BY email`,
     )
-    res.json({ count: rows.length, recipients: rows.map((r) => r.email) })
+    const lastSyncedAt = rows.reduce<Date | null>((latest, row) => {
+      if (!(row.synced_at instanceof Date)) return latest
+      return latest === null || row.synced_at > latest ? row.synced_at : latest
+    }, null)
+    res.json({
+      count: rows.length,
+      recipients: rows.map((r) => r.email),
+      lastSyncedAt: lastSyncedAt ? lastSyncedAt.toISOString() : null,
+    })
   } catch (err) {
     next(err)
   }

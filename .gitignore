@@ -8,3 +8,7 @@ dist/
 # Local environment files — secrets never belong in the repository
 .env
 .env.*
+
+# Scheduler runtime state (durable execution history lives on a mounted disk)
+scheduler/data/
+scheduler/*.lock

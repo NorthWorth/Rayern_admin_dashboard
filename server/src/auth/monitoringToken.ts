@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express'
 import { config } from '../config'
+import { constantTimeEqual } from './constantTimeEqual'
 
 /**
  * Fail-closed service-token guard for `GET /internal/dashboard-metrics`.
@@ -31,8 +32,9 @@ export function requireMonitoringToken(req: Request, res: Response, next: NextFu
     return
   }
 
+  // Constant-time: a byte-wise `!==` leaks how much of the token matched.
   const token = header.slice('Bearer '.length)
-  if (token !== expected) {
+  if (!constantTimeEqual(token, expected)) {
     res.status(401).json({
       success: false,
       error: { code: 'MONITORING_TOKEN_INVALID', message: 'Invalid monitoring token' },

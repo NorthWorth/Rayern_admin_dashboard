@@ -1,4 +1,4 @@
-import { apiRequest, USE_DEMO_DATA } from '../lib/api'
+import { apiRequest, buildQuery, USE_DEMO_DATA } from '../lib/api'
 import type { AuditEvent, AuditFilters } from '../lib/types'
 import { buildAuditEvents } from './demoData'
 
@@ -23,6 +23,12 @@ function filterEvents(list: AuditEvent[], filters: AuditFilters): AuditEvent[] {
 export const auditService = {
   list(filters: AuditFilters = {}): Promise<AuditEvent[]> {
     if (USE_DEMO_DATA) return delay(filterEvents(demoEvents, filters))
-    return apiRequest<AuditEvent[]>('/audit')
+    // Filters are applied server-side (actor kind + free-text search); the
+    // request must carry them or the table silently shows unfiltered results.
+    const query = buildQuery({
+      search: filters.search?.trim() || undefined,
+      actorKind: filters.actorKind && filters.actorKind !== 'all' ? filters.actorKind : undefined,
+    })
+    return apiRequest<AuditEvent[]>(`/audit${query}`)
   },
 }

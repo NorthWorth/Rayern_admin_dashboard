@@ -12,6 +12,25 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { RequestHandler } from 'express'
 
+/**
+ * The feedback status route writes an audit event. Capturing the call proves
+ * what is recorded (id + new status) and, just as importantly, that the
+ * message body is never copied into the audit trail.
+ */
+const { auditCalls } = vi.hoisted(() => ({ auditCalls: [] as Array<Record<string, unknown>> }))
+vi.mock('../audit', () => ({
+  recordAudit: async (
+    actor: string,
+    actorKind: string,
+    action: string,
+    target: string,
+    metadata: Record<string, string> = {},
+  ) => {
+    auditCalls.push({ actor, actorKind, action, target, metadata })
+  },
+  adminActor: (admin: { email: string }) => admin.email,
+}))
+
 interface RecordedRequest {
   method: string
   url: string
@@ -137,6 +156,87 @@ beforeAll(async () => {
                 accepted: [{ email: 'ada@example.com', providerMessageId: 'pm1' }],
                 failed: [],
                 skipped: [{ email: 'alan@example.com', reason: 'not_opted_in' }],
+              },
+            },
+          }),
+        )
+        return
+      }
+
+      if (url.pathname === '/api/v1/admin/feedback/summary') {
+        res.end(
+          JSON.stringify({
+            success: true,
+            data: {
+              total: 12,
+              byStatus: { open: 5, reviewed: 4, resolved: 3 },
+              byCategory: { 'General feedback': 6, 'Bug report': 6 },
+              lastSubmittedAt: '2026-11-19T10:00:00.000Z',
+            },
+          }),
+        )
+        return
+      }
+
+      if (url.pathname === '/api/v1/admin/feedback') {
+        res.end(
+          JSON.stringify({
+            success: true,
+            data: {
+              pagination: {
+                page: Number(url.searchParams.get('page') ?? 1),
+                limit: Number(url.searchParams.get('limit') ?? 50),
+                totalResults: 1,
+                totalPages: 1,
+                hasNextPage: false,
+              },
+              filters: {
+                category: url.searchParams.get('category'),
+                status: url.searchParams.get('status'),
+                sort: url.searchParams.get('sort') ?? 'createdAt:desc',
+              },
+              feedback: [
+                {
+                  id: '5f1d7c9a2b8e4f0c9d3a6b71',
+                  category: 'Bug report',
+                  message: 'Export button does nothing on Safari.',
+                  status: 'open',
+                  source: 'app',
+                  createdAt: '2026-11-18T09:00:00.000Z',
+                  updatedAt: '2026-11-18T09:00:00.000Z',
+                  reviewedAt: null,
+                  workspaceId: 'w1',
+                  user: { id: 'u1', email: 'ada@example.com' },
+                },
+              ],
+            },
+          }),
+        )
+        return
+      }
+
+      if (url.pathname.startsWith('/api/v1/admin/feedback/') && req.method === 'PATCH') {
+        const id = url.pathname.split('/').pop() ?? ''
+        if (id === '000000000000000000000000') {
+          res.statusCode = 404
+          res.end(JSON.stringify({ success: false, error: { code: 'FEEDBACK_NOT_FOUND', message: 'Feedback not found.' } }))
+          return
+        }
+        res.end(
+          JSON.stringify({
+            success: true,
+            data: {
+              feedback: {
+                id,
+                category: 'Bug report',
+                message: 'Export button does nothing on Safari.',
+                status: (body as { status?: string } | null)?.status ?? 'open',
+                source: 'app',
+                createdAt: '2026-11-18T09:00:00.000Z',
+                updatedAt: '2026-11-20T09:00:00.000Z',
+                reviewedAt: '2026-11-20T09:00:00.000Z',
+                workspaceId: 'w1',
+                user: { id: 'u1', email: 'ada@example.com' },
               },
             },
           }),
@@ -291,6 +391,109 @@ describe('POST /api/v1/admin/campaigns/send', () => {
       body: JSON.stringify({ subject: '', bodyHtml: 'x', audience: { type: 'all_eligible' } }),
     })
     expect(res.status).toBe(400)
+    expect(requests).toHaveLength(0)
+  })
+})
+
+describe('GET /api/v1/admin/feedback', () => {
+  it('forwards pagination, filters and sort to Rayern and relays the queue', async () => {
+    const res = await api('/api/v1/admin/feedback?page=2&limit=25&category=Bug%20report&status=open&sort=createdAt:asc')
+    expect(res.status).toBe(200)
+
+    const upstreamCall = requests.find((r) => r.url.startsWith('/api/v1/admin/feedback?'))
+    expect(upstreamCall?.url).toContain('page=2')
+    expect(upstreamCall?.url).toContain('limit=25')
+    expect(upstreamCall?.url).toContain('category=Bug+report')
+    expect(upstreamCall?.url).toContain('status=open')
+    expect(upstreamCall?.url).toContain('sort=createdAt%3Aasc')
+    expect(upstreamCall?.auth).toBe(`Bearer ${UPSTREAM_TOKEN}`)
+
+    const payload = (await res.json()) as {
+      success: boolean
+      data: { feedback: Array<{ id: string; message: string; user: { email: string } | null }>; pagination: { totalResults: number } }
+    }
+    expect(payload.success).toBe(true)
+    expect(payload.data.pagination.totalResults).toBe(1)
+    expect(payload.data.feedback[0].user?.email).toBe('ada@example.com')
+  })
+
+  it('rejects an unsupported category or sort before calling Rayern', async () => {
+    expect((await api('/api/v1/admin/feedback?category=Complaint')).status).toBe(400)
+    expect((await api('/api/v1/admin/feedback?sort=message:desc')).status).toBe(400)
+    expect((await api('/api/v1/admin/feedback?status=archived')).status).toBe(400)
+    expect(requests).toHaveLength(0)
+  })
+
+  it('relays the aggregate summary', async () => {
+    const res = await api('/api/v1/admin/feedback/summary')
+    expect(res.status).toBe(200)
+    const payload = (await res.json()) as {
+      data: { total: number; byStatus: { open: number }; byCategory: Record<string, number>; lastSubmittedAt: string }
+    }
+    expect(payload.data.total).toBe(12)
+    expect(payload.data.byStatus.open).toBe(5)
+    expect(payload.data.lastSubmittedAt).toBe('2026-11-19T10:00:00.000Z')
+  })
+})
+
+describe('PATCH /api/v1/admin/feedback/:id', () => {
+  it('forwards the status transition and audits id + status only', async () => {
+    auditCalls.length = 0
+    const id = '5f1d7c9a2b8e4f0c9d3a6b71'
+    const res = await api(`/api/v1/admin/feedback/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status: 'resolved' }),
+    })
+    expect(res.status).toBe(200)
+
+    const upstreamCall = requests.find((r) => r.url === `/api/v1/admin/feedback/${id}`)
+    expect(upstreamCall?.method).toBe('PATCH')
+    expect(upstreamCall?.body).toEqual({ status: 'resolved' })
+
+    const payload = (await res.json()) as { data: { feedback: { status: string } } }
+    expect(payload.data.feedback.status).toBe('resolved')
+
+    expect(auditCalls).toHaveLength(1)
+    expect(auditCalls[0]).toEqual({
+      actor: 'ops@rayern.test',
+      actorKind: 'admin',
+      action: 'feedback.status_update',
+      target: id,
+      metadata: { status: 'resolved' },
+    })
+    // Customer content never reaches the audit trail (it is searchable/exportable).
+    expect(JSON.stringify(auditCalls[0])).not.toContain('Export button')
+  })
+
+  it('rejects an invalid identifier or status without calling Rayern', async () => {
+    auditCalls.length = 0
+    expect((await api('/api/v1/admin/feedback/not-an-id', { method: 'PATCH', body: JSON.stringify({ status: 'resolved' }) })).status).toBe(400)
+    expect((await api('/api/v1/admin/feedback/5f1d7c9a2b8e4f0c9d3a6b71', { method: 'PATCH', body: JSON.stringify({ status: 'archived' }) })).status).toBe(400)
+    expect(requests).toHaveLength(0)
+    expect(auditCalls).toHaveLength(0)
+  })
+
+  it('relays an upstream not-found and records no audit event', async () => {
+    auditCalls.length = 0
+    const res = await api('/api/v1/admin/feedback/000000000000000000000000', {
+      method: 'PATCH',
+      body: JSON.stringify({ status: 'reviewed' }),
+    })
+    expect(res.status).toBe(404)
+    const payload = (await res.json()) as { success: boolean; error: { code: string } }
+    expect(payload.error.code).toBe('FEEDBACK_NOT_FOUND')
+    expect(auditCalls).toHaveLength(0)
+  })
+})
+
+describe('feedback authorization', () => {
+  it('rejects a non-administrator token with 403 and never reaches Rayern', async () => {
+    const authModule = await import('../auth')
+    const viewerToken = authModule.signAdminToken({ sub: 'v1', email: 'viewer@rayern.test', name: 'V', role: 'viewer' })
+    const res = await api('/api/v1/admin/feedback', {}, viewerToken)
+    expect(res.status).toBe(403)
+    const payload = (await res.json()) as { error: { code: string } }
+    expect(payload.error.code).toBe('ADMIN_ACCESS_REQUIRED')
     expect(requests).toHaveLength(0)
   })
 })

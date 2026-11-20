@@ -1,4 +1,4 @@
-import { apiRequest, USE_DEMO_DATA } from '../lib/api'
+import { apiRequest, buildQuery, USE_DEMO_DATA } from '../lib/api'
 import type { ErrorEntry, ErrorFilters } from '../lib/types'
 import { buildErrors } from './demoData'
 
@@ -23,6 +23,13 @@ function filterErrors(list: ErrorEntry[], filters: ErrorFilters): ErrorEntry[] {
 export const errorsService = {
   list(filters: ErrorFilters = {}): Promise<ErrorEntry[]> {
     if (USE_DEMO_DATA) return delay(filterErrors(demoErrors, filters))
-    return apiRequest<ErrorEntry[]>('/errors')
+    // The filters must reach the server: the backend owns the WHERE clause.
+    // Sending them here keeps the UI and the API in agreement (a client-side
+    // re-filter of an unfiltered 500-row page silently hides real matches).
+    const query = buildQuery({
+      search: filters.search?.trim() || undefined,
+      severity: filters.severity && filters.severity !== 'all' ? filters.severity : undefined,
+    })
+    return apiRequest<ErrorEntry[]>(`/errors${query}`)
   },
 }

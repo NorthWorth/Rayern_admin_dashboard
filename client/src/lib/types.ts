@@ -41,7 +41,8 @@ export interface UserStats {
   newUsers7d: number
   verified: number
   unverified: number
-  deleted30d: number
+  /** null = Rayern does not measure deletion accounting (never a fake 0). */
+  deleted30d: number | null
 }
 
 export interface UserFilters {
@@ -89,9 +90,12 @@ export interface PlatformMetricsOverview {
   newAccounts30d: number
   verifiedAccounts: number
   unverifiedAccounts: number
-  deletedAccounts30d: number
-  deletionRequestsPending: number
-  totalWorkspaces: number
+  /** null = not measured upstream (Rayern has no deletion accounting). */
+  deletedAccounts30d: number | null
+  deletionRequestsPending: number | null
+  /** null = the workspaces aggregate was not part of the newest snapshot. */
+  totalWorkspaces: number | null
+  newWorkspaces30d: number | null
   registrationsTrend: Array<{ date: string; count: number }>
   planBreakdown: Array<{ plan: Workspace['plan']; count: number }>
   /** Which source served these counts: synchronized Rayern aggregates or the local registry. */
@@ -171,8 +175,8 @@ export interface SystemOverview {
   recentFailures: RecentFailure[]
 
   /**
-   * Health of the dashboard-side Rayern pull-sync worker. The dashboard
-   * OUTBOUND polls Rayern; Rayern never calls the dashboard.
+   * Health of the Rayern snapshot transport. Rayern generates snapshots and
+   * pushes them here; an optional pull worker remains as a legacy fallback.
    */
   sync: RayernSyncStatus
 }
@@ -194,6 +198,57 @@ export interface RayernSyncStatus {
   consecutiveFailures: number
   stale: boolean
   running: boolean
+  /** Which transports are configured (push ingestion, pull worker, wake endpoint). */
+  transport?: 'push' | 'pull' | 'both' | 'none'
+  pullEnabled?: boolean
+  pushEnabled?: boolean
+  wakeEnabled?: boolean
+  /** Expected cadence and the window after which data counts as stale. */
+  expectedIntervalMs?: number
+  freshnessWindowMs?: number
+  lastHttpStatus?: number | null
+  dataUpdatedAt?: string | null
+  rateLimitedUntil?: string | null
+}
+
+/**
+ * Read-only status of the independent scheduler service, proxied by the
+ * dashboard backend. `configured`/`reachable` are distinct so an unconfigured
+ * scheduler is never presented as healthy.
+ */
+export interface SchedulerStatusResponse {
+  configured: boolean
+  reachable: boolean
+  reason: string | null
+  checkedAt: string
+  status: {
+    state: string | null
+    running: boolean
+    intervalMs: number | null
+    lastScheduledExecutionAt: string | null
+    lastAttemptAt: string | null
+    lastSuccessAt: string | null
+    lastFailureAt: string | null
+    lastOutcome: string | null
+    nextScheduledAt: string | null
+    consecutiveFailures: number | null
+    lastHttpStatus: number | null
+    lastErrorCategory: string | null
+    edgeChallenge: boolean
+    reachedApplication: boolean | null
+    history: Array<{
+      id: string | null
+      trigger: string | null
+      startedAt: string | null
+      finishedAt: string | null
+      outcome: string | null
+      category: string | null
+      httpStatus: number | null
+      attempts: number | null
+      reachedApplication: boolean | null
+      message: string | null
+    }>
+  } | null
 }
 
 export interface RecentFailure {

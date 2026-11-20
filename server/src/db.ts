@@ -41,6 +41,28 @@ export function isDbReady(): boolean {
   return dbReady
 }
 
+/**
+ * Production must never fall back to the in-memory development database.
+ *
+ * PGlite is an in-memory Postgres used for zero-config local development: its
+ * contents vanish on restart. In production that would silently discard every
+ * snapshot, audit event and email record, and make ingestion appear to work
+ * while nothing is durable. This check fails fast and loudly instead.
+ *
+ * Reads process.env directly (rather than the import-time `config` object) so
+ * the guard can be tested without reloading modules.
+ */
+export function assertProductionDatabaseConfigured(): void {
+  if (process.env.NODE_ENV !== 'production') return
+  const url = process.env.DATABASE_URL?.trim() ?? ''
+  if (url) return
+  throw new Error(
+    'DATABASE_URL is required in production. Refusing to start with the in-memory development database: ' +
+      'snapshots, audit events and settings would not survive a restart. Set DATABASE_URL (and DATABASE_CA_CERT ' +
+      'for a managed provider) and restart the service.',
+  )
+}
+
 export async function startEmbeddedDbIfConfigured(): Promise<void> {
   if (!USING_EMBEDDED_DB) return
   const [{ PGlite }, { PGLiteSocketServer }] = await Promise.all([
@@ -56,6 +78,51 @@ export async function startEmbeddedDbIfConfigured(): Promise<void> {
 export async function query<T = unknown>(text: string, params: unknown[] = []): Promise<T[]> {
   const res = await pool.query(text, params as never[])
   return res.rows as T[]
+}
+
+/**
+ * Minimal query executor. Everything that writes is written against this
+ * interface so the same code can run inside a transaction or not.
+ */
+export interface SqlExecutor {
+  query<T = unknown>(text: string, params?: unknown[]): Promise<T[]>
+}
+
+/** Default executor — the pool, one statement at a time. */
+export const db: SqlExecutor = {
+  query: <T = unknown>(text: string, params: unknown[] = []) => query<T>(text, params),
+}
+
+/**
+ * Runs `fn` inside a single database transaction.
+ *
+ * Snapshot ingestion uses this so a failure halfway through can never leave
+ * sections from different snapshots presented as one consistent update: either
+ * every section and the snapshot/status bookkeeping commits, or none does.
+ */
+export async function withTransaction<T>(fn: (tx: SqlExecutor) => Promise<T>): Promise<T> {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const tx: SqlExecutor = {
+      query: async <U = unknown>(text: string, params: unknown[] = []) => {
+        const res = await client.query(text, params as never[])
+        return res.rows as U[]
+      },
+    }
+    const result = await fn(tx)
+    await client.query('COMMIT')
+    return result
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK')
+    } catch {
+      // The connection may already be gone; the original error is what matters.
+    }
+    throw err
+  } finally {
+    client.release()
+  }
 }
 
 let initialized = false

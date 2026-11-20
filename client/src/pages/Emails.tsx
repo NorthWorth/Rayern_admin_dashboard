@@ -14,6 +14,7 @@ import { usePageRefresh } from '../hooks/usePageRefresh'
 import { emailsService } from '../services/emails'
 import { rayernService } from '../services/rayern'
 import { CampaignComposer } from '../components/CampaignComposer'
+import { AudienceFreshness } from '../components/AudienceFreshness'
 import { UnavailablePanel } from '../components/UnavailablePanel'
 import { DEFAULT_FROM } from '../lib/api'
 import { formatCount, formatDateTime, formatNumber, formatPct, rayernReasonText, timeAgo, titleCase } from '../lib/utils'
@@ -227,6 +228,7 @@ export function EmailComposer({ open, copyId, onClose, onSent }: { open: boolean
   const [sendError, setSendError] = useState<string | null>(null)
 
   const [audienceCount, setAudienceCount] = useState<number | null>(null)
+  const [audienceSyncedAt, setAudienceSyncedAt] = useState<string | null>(null)
   const [loadingAudience, setLoadingAudience] = useState(false)
 
   const toInvalid = to.length === 0
@@ -258,8 +260,9 @@ export function EmailComposer({ open, copyId, onClose, onSent }: { open: boolean
   const loadAudience = async (): Promise<void> => {
     setLoadingAudience(true)
     try {
-      const { count, recipients } = await emailsService.audience('all')
+      const { count, recipients, lastSyncedAt } = await emailsService.audience()
       setAudienceCount(count)
+      setAudienceSyncedAt(lastSyncedAt)
       setTo(recipients)
     } catch {
       showToast('error', 'Could not load the recipient audience.')
@@ -269,7 +272,7 @@ export function EmailComposer({ open, copyId, onClose, onSent }: { open: boolean
   }
 
   const reset = (): void => {
-    setTo([]); setCc([]); setBcc([]); setSubject(''); setMessage(''); setSendError(null); setAudienceCount(null)
+    setTo([]); setCc([]); setBcc([]); setSubject(''); setMessage(''); setSendError(null); setAudienceCount(null); setAudienceSyncedAt(null)
   }
 
   const handleSend = async (): Promise<void> => {
@@ -316,9 +319,10 @@ export function EmailComposer({ open, copyId, onClose, onSent }: { open: boolean
                 {loadingAudience ? 'Loading audience…' : 'Select all recipients'}
               </button>
               {audienceCount !== null ? (
-                <span className="text-[11px] text-ink-400">{audienceCount} account emails filled</span>
+                <span className="text-[11px] text-ink-400">{audienceCount} eligible emails filled</span>
               ) : null}
             </div>
+            {audienceCount !== null ? <AudienceFreshness lastSyncedAt={audienceSyncedAt} /> : null}
           </div>
         </Field>
         <Field label="Type" hint="Category shown in history and audit log">

@@ -49,7 +49,7 @@ export function RetentionPage() {
         title="Retention & engagement"
         description="Returning usage, active-user counts and cohort durability."
         actions={<PeriodSelector value={period} onChange={setPeriod} />}
-        footnote={`Reporting timezone: ${REPORTING_TIMEZONE} · cohorts are UTC registration months.${
+        footnote={`Reporting timezone: ${REPORTING_TIMEZONE} · cohorts are Monday-start UTC registration weeks (Rayern's cohort definition), not calendar months.${
           instQ.data?.syncedAt ? ` · instrumentation synced ${timeAgo(instQ.data.syncedAt)}` : ''
         }`}
       />

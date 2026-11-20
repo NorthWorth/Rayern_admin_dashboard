@@ -18,7 +18,7 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import { pool, isDbReady, query, USING_EMBEDDED_DB } from '../db'
-import { config, rayernSyncEnabled } from '../config'
+import { config } from '../config'
 import { getSyncStatus } from '../rayernSync'
 import {
   computeApiHealth,
@@ -260,6 +260,35 @@ router.get('/overview', async (_req, res, next) => {
     const resendConfigured = Boolean(config.resendApiKey)
     const poolStats = { total: pool.totalCount, idle: pool.idleCount, waiting: pool.waitingCount }
 
+    // Rayern transport health from execution evidence only. `unknown` means
+    // "configured but nothing has run yet" and is never reported as healthy.
+    const rayernDependency: { status: HealthStatus; reason: string } = !sync.enabled
+      ? {
+          status: 'unknown',
+          reason:
+            'No snapshot transport is configured (set RAYERN_SNAPSHOT_TOKEN for push, and RAYERN_WAKEUP_ENDPOINT for the external scheduler)',
+        }
+      : sync.lastSuccessAt === null && sync.lastAttemptAt === null
+        ? {
+            status: 'unknown',
+            reason: 'Transport configured but no delivery or execution has been observed yet',
+          }
+        : sync.consecutiveFailures >= 3 || (sync.stale && sync.lastSuccessAt !== null)
+          ? {
+              status: 'failing',
+              reason: sync.lastError
+                ? `Snapshots are stale or failing: ${sync.lastError}`
+                : 'No successful snapshot inside the freshness window',
+            }
+          : sync.consecutiveFailures >= 1 || sync.lastSuccessAt === null
+            ? {
+                status: 'degraded',
+                reason: sync.lastError
+                  ? `Last execution failed: ${sync.lastError}`
+                  : 'Configured, but no successful snapshot has been recorded yet',
+              }
+            : { status: 'healthy', reason: 'Snapshots are arriving inside the freshness window' }
+
     const dependencies: DependencyRowView[] = [
       {
         id: 'dep:postgresql',
@@ -285,26 +314,45 @@ router.get('/overview', async (_req, res, next) => {
         historyKey: 'postgres',
       },
       {
+        // Transport-aware: a push/wake deployment is a healthy, configured
+        // dependency even though RAYERN_SYNC_ENDPOINT (pull) is absent. Status
+        // is derived from actual execution evidence, never from an env var.
         id: 'dep:rayern-metrics',
-        name: 'Rayern metrics endpoint',
+        name: 'Rayern snapshot transport',
         kind: 'api',
-        status: rayernSyncEnabled() ? rayernService.status : 'unknown',
-        reason: rayernSyncEnabled() ? rayernService.reason : 'RAYERN_SYNC_ENDPOINT is not configured',
-        availabilityPct: rayernSyncEnabled() ? rayernService.availabilityPct : null,
-        requestCount: rayernSyncEnabled() ? rayernService.sampleCount : null,
-        errorCount: rayernSyncEnabled() ? rayernService.errorCount : null,
-        errorRatePct: rayernSyncEnabled() ? rayernService.errorRatePct : null,
-        p95Ms: rayernSyncEnabled() ? rayernService.p95Ms : null,
-        lastSuccessAt: iso(rayernService.lastSuccessAt),
-        lastFailureAt: iso(rayernService.lastFailureAt),
-        lastObservedAt: iso(rayernService.lastTelemetryAt),
-        freshness: rayernSyncEnabled()
-          ? freshnessView(rayernService.lastTelemetryAt, rayernService.telemetryAgeMs, rayernService.freshness)
-          : freshnessView(null, null, 'none'),
-        configured: rayernSyncEnabled(),
+        status: rayernDependency.status,
+        reason: rayernDependency.reason,
+        availabilityPct: sync.pullEnabled ? rayernService.availabilityPct : null,
+        requestCount: sync.pullEnabled ? rayernService.sampleCount : null,
+        errorCount: sync.pullEnabled ? rayernService.errorCount : null,
+        errorRatePct: sync.pullEnabled ? rayernService.errorRatePct : null,
+        p95Ms: sync.pullEnabled ? rayernService.p95Ms : null,
+        lastSuccessAt: sync.lastSuccessAt ?? iso(rayernService.lastSuccessAt),
+        lastFailureAt: sync.lastFailureAt ?? iso(rayernService.lastFailureAt),
+        lastObservedAt: sync.lastAttemptAt ?? iso(rayernService.lastTelemetryAt),
+        freshness:
+          sync.enabled && !sync.stale && sync.lastSuccessAt !== null
+            ? freshnessView(new Date(sync.lastSuccessAt).getTime(), Date.now() - new Date(sync.lastSuccessAt).getTime(), 'fresh')
+            : sync.lastSuccessAt !== null
+              ? freshnessView(new Date(sync.lastSuccessAt).getTime(), Date.now() - new Date(sync.lastSuccessAt).getTime(), 'stale')
+              : freshnessView(null, null, 'none'),
+        configured: sync.enabled,
         detail: [
-          { label: 'Pull interval', value: `${Math.round(config.rayern.intervalMs / 60_000)}m` },
-          { label: 'Last pull', value: sync.lastDurationMs !== null ? `${sync.lastDurationMs}ms` : '—' },
+          {
+            label: 'Transport',
+            value:
+              sync.transport === 'both'
+                ? `push + pull (push${sync.pushEnabled ? '' : ' token missing'}, wake ${sync.wakeEnabled ? 'configured' : 'off'})`
+                : sync.transport === 'push'
+                  ? `push${sync.pushEnabled ? '' : ' token missing'}${sync.wakeEnabled ? ' + external wake scheduler' : ''}`
+                  : sync.transport === 'pull'
+                    ? 'pull only'
+                    : 'none configured',
+          },
+          { label: 'Expected cadence', value: `${Math.round(sync.expectedIntervalMs / 60_000)}m` },
+          { label: 'Stale after', value: `${Math.round(sync.freshnessWindowMs / 60_000)}m without a successful snapshot` },
+          { label: 'Last attempt', value: sync.lastAttemptAt ? new Date(sync.lastAttemptAt).toLocaleString() : '—' },
+          { label: 'Last success via', value: sync.lastSuccessTransport ?? '—' },
           { label: 'Last HTTP', value: sync.lastHttpStatus !== null ? String(sync.lastHttpStatus) : '—' },
           { label: 'Consecutive failures', value: String(sync.consecutiveFailures) },
           ...(sync.rateLimitedUntil
@@ -312,7 +360,7 @@ router.get('/overview', async (_req, res, next) => {
             : []),
           { label: 'Data updated', value: sync.dataUpdatedAt ? new Date(sync.dataUpdatedAt).toLocaleString() : 'never' },
         ],
-        historyKey: 'rayern-sync',
+        historyKey: sync.pullEnabled ? 'rayern-sync' : null,
       },
       {
         id: 'dep:resend',
@@ -458,6 +506,12 @@ router.get('/overview', async (_req, res, next) => {
         dataUpdatedAt: sync.dataUpdatedAt,
         intervalMs: sync.intervalMs,
         rateLimitedUntil: sync.rateLimitedUntil,
+        transport: sync.transport,
+        pullEnabled: sync.pullEnabled,
+        pushEnabled: sync.pushEnabled,
+        wakeEnabled: sync.wakeEnabled,
+        expectedIntervalMs: sync.expectedIntervalMs,
+        freshnessWindowMs: sync.freshnessWindowMs,
       },
       metricsSync: {
         // Spec §17: an explicit, separate signal for the metrics-PULL process
@@ -465,14 +519,14 @@ router.get('/overview', async (_req, res, next) => {
         // names the exact condition (rate-limited / failing / stale / healthy).
         status: syncStatus,
         reason: !sync.enabled
-          ? 'Rayern synchronization is not configured'
+          ? 'No Rayern snapshot transport is configured'
           : sync.rateLimitedUntil
-            ? `429 rate limited — next pull after ${sync.rateLimitedUntil}`
+            ? `429 rate limited — retry after ${sync.rateLimitedUntil}`
             : sync.consecutiveFailures > 0
-              ? `${sync.consecutiveFailures} consecutive pull failure(s) — data age ${sync.dataUpdatedAt ? Math.round((Date.now() - new Date(sync.dataUpdatedAt).getTime()) / 60_000) + 'm' : 'n/a'}`
+              ? `${sync.consecutiveFailures} consecutive failure(s) — data age ${sync.dataUpdatedAt ? Math.round((Date.now() - new Date(sync.dataUpdatedAt).getTime()) / 60_000) + 'm' : 'n/a'}`
               : syncStatus === 'healthy'
-                ? 'pulls succeeding on schedule'
-                : 'no successful pull yet',
+                ? `snapshots arriving on the ${Math.round(sync.expectedIntervalMs / 60_000)}m schedule (${sync.transport})`
+                : 'no successful snapshot yet',
         dataAgeMs: sync.dataUpdatedAt !== null ? Date.now() - new Date(sync.dataUpdatedAt).getTime() : null,
       },
       meta: {
@@ -635,6 +689,116 @@ router.get('/transitions', async (req, res, next) => {
         at: r.triggered_at.toISOString(),
       })),
     )
+  } catch (err) {
+    next(err)
+  }
+})
+
+/* ------------------------- Scheduler (read-only) -------------------------- */
+
+/**
+ * GET /system/scheduler
+ *
+ * Read-only proxy to the independent scheduler's status endpoint. The browser
+ * never talks to the scheduler and never sees either credential; the scheduler
+ * status token stays in this process. An unreachable/unconfigured scheduler is
+ * reported explicitly — it is never rendered as "healthy".
+ */
+router.get('/scheduler', async (_req, res, next) => {
+  try {
+    if (!config.rayern.schedulerStatusUrl || !config.rayern.schedulerStatusToken) {
+      res.json({
+        configured: false,
+        reachable: false,
+        reason:
+          'SCHEDULER_STATUS_URL and SCHEDULER_STATUS_TOKEN are not configured — the external scheduler cannot be queried from this deployment.',
+        checkedAt: new Date().toISOString(),
+        status: null,
+      })
+      return
+    }
+
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), config.rayern.schedulerTimeoutMs)
+    try {
+      const upstream = await fetch(`${config.rayern.schedulerStatusUrl}/status`, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${config.rayern.schedulerStatusToken}`,
+        },
+        signal: controller.signal,
+      })
+      if (!upstream.ok) {
+        res.json({
+          configured: true,
+          reachable: true,
+          reason: `Scheduler status endpoint answered HTTP ${upstream.status}.`,
+          checkedAt: new Date().toISOString(),
+          status: null,
+        })
+        return
+      }
+      const raw = (await upstream.json()) as Record<string, unknown>
+      // Allow-list: only these fields cross back to the browser.
+      const str = (v: unknown): string | null => (typeof v === 'string' ? v : null)
+      const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+      const history = Array.isArray(raw.history)
+        ? raw.history.slice(0, 20).map((entry) => {
+            const e = (entry ?? {}) as Record<string, unknown>
+            return {
+              id: str(e.id),
+              trigger: str(e.trigger),
+              startedAt: str(e.startedAt),
+              finishedAt: str(e.finishedAt),
+              outcome: str(e.outcome),
+              category: str(e.category),
+              httpStatus: num(e.httpStatus),
+              attempts: num(e.attempts),
+              reachedApplication: typeof e.reachedApplication === 'boolean' ? e.reachedApplication : null,
+              message: str(e.message),
+            }
+          })
+        : []
+
+      res.json({
+        configured: true,
+        reachable: true,
+        reason: null,
+        checkedAt: new Date().toISOString(),
+        status: {
+          state: str(raw.state),
+          running: raw.running === true,
+          intervalMs: num(raw.intervalMs),
+          lastScheduledExecutionAt: str(raw.lastScheduledExecutionAt),
+          lastAttemptAt: str(raw.lastAttemptAt),
+          lastSuccessAt: str(raw.lastSuccessAt),
+          lastFailureAt: str(raw.lastFailureAt),
+          lastOutcome: str(raw.lastOutcome),
+          nextScheduledAt: str(raw.nextScheduledAt),
+          consecutiveFailures: num(raw.consecutiveFailures),
+          lastHttpStatus: num(raw.lastHttpStatus),
+          lastErrorCategory: str(raw.lastErrorCategory),
+          edgeChallenge: raw.edgeChallenge === true,
+          reachedApplication:
+            typeof raw.reachedApplication === 'boolean' ? raw.reachedApplication : null,
+          history,
+        },
+      })
+    } catch (err) {
+      const aborted = err instanceof Error && err.name === 'AbortError'
+      res.json({
+        configured: true,
+        reachable: false,
+        reason: aborted
+          ? `Scheduler status request timed out after ${config.rayern.schedulerTimeoutMs}ms.`
+          : 'Scheduler status endpoint is unreachable.',
+        checkedAt: new Date().toISOString(),
+        status: null,
+      })
+    } finally {
+      clearTimeout(timer)
+    }
   } catch (err) {
     next(err)
   }

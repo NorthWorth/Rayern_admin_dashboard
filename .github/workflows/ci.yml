@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install (lockfile-pinned)
+        run: |
+          cd server && bun install --frozen-lockfile
+          cd ../client && bun install --frozen-lockfile
+          cd ../scheduler && bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: |
+          cd client && bun tsc -b --noEmit
+          cd ../server && bun tsc --noEmit
+          cd ../scheduler && bun tsc --noEmit
+
+      - name: Server tests (contract, ingestion, auth, diagnostics)
+        run: cd server && bun run test
+
+      - name: Client tests
+        run: cd client && bun run test
+
+      - name: Scheduler tests
+        run: cd scheduler && bun run test
+
+      - name: Client build
+        run: cd client && bun run build

@@ -6,6 +6,7 @@ import { Field, Input, Select, Textarea } from './ui/Input'
 import { Badge } from './ui/Badge'
 import { EmptyState, ErrorState, LoadingBlock } from './ui/states'
 import { useToast } from './ui/Toast'
+import { AudienceFreshness } from './AudienceFreshness'
 import { useQuery } from '../hooks/useQuery'
 import { campaignsService } from '../services/campaigns'
 import { audienceService } from '../services/audience'
@@ -145,8 +146,6 @@ export function CampaignComposer({
   ).length
   const ineligibleCount = totalSynced - eligibleCount
   const lastSyncedAt = audienceQ.data?.lastSyncedAt ?? null
-  const staleSync =
-    lastSyncedAt !== null && Date.now() - new Date(lastSyncedAt).getTime() > 24 * 60 * 60 * 1000
 
   // Rayern-side audience sync status (present on the System page). Kept local;
   useEffect(() => {
@@ -379,6 +378,8 @@ export function CampaignComposer({
               </Field>
             </div>
 
+            <AudienceFreshness lastSyncedAt={lastSyncedAt} className="mb-3" />
+
             {audienceQ.loading ? (
               <LoadingBlock rows={4} />
             ) : audienceQ.error ? (
@@ -471,12 +472,6 @@ export function CampaignComposer({
               total synchronised {totalSynced} · eligible (opted in + active + verified) {eligibleCount} · not
               eligible {ineligibleCount} · selected {selected.length} · not selected{' '}
               {totalSynced - selected.length}
-              <div className="mt-1">
-                {lastSyncedAt
-                  ? `Last synchronized ${new Date(lastSyncedAt).toLocaleString()}`
-                  : 'Audience has not been synchronized yet — Rayern must push the audience before any recipient is available.'}
-                {staleSync ? ' · sync looks stale, re-sync before sending' : ''}
-              </div>
             </div>
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-ink-500">
               <span>

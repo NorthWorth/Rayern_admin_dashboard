@@ -1,4 +1,5 @@
-export type BillingCurrency = 'USD'
+/** ISO-4217 code as reported by Rayern (`NGN`, `USD`, …) — never assumed. */
+export type BillingCurrency = string
 export type BillingAmountUnit = 'minor_units'
 export type RayernServiceKind = 'api' | 'database' | 'cache' | 'queue' | 'email' | 'storage'
 export type RayernServiceStatus = 'healthy' | 'degraded' | 'failing'
@@ -8,6 +9,7 @@ export interface AdminMetricAccounts {
   newAccounts30d: number
   verifiedAccounts: number
   unverifiedAccounts: number
+  /** null = Rayern does not measure this (never rendered as 0). */
   deletedAccounts30d: number | null
   deletionRequestsPending: number | null
   registrationsTrend: Array<{ date: string; count: number }>
