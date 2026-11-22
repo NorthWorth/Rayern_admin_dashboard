@@ -284,20 +284,27 @@ describe('scheduled wake-and-push preserved', () => {
 
     const calls: Array<{ sql: string; params?: unknown[] }> = []
     const snapshots = new Set<string>()
-    vi.doMock('../db', () => ({
-      query: vi.fn(async (sql: string, params?: unknown[]) => {
-        calls.push({ sql: String(sql), params })
-        const q = String(sql)
-        if (q.includes('SELECT snapshot_id FROM rayern_snapshots')) {
-          const id = String(params?.[0])
-          return snapshots.has(id) ? [{ snapshot_id: id }] : []
-        }
-        if (q.includes('INSERT INTO rayern_snapshots')) {
-          snapshots.add(String(params?.[0]))
-          return []
-        }
+    const mockQuery = vi.fn(async (sql: string, params?: unknown[]) => {
+      calls.push({ sql: String(sql), params })
+      const q = String(sql)
+      if (q.includes('SELECT snapshot_id FROM rayern_snapshots')) {
+        const id = String(params?.[0])
+        return snapshots.has(id) ? [{ snapshot_id: id }] : []
+      }
+      if (q.includes('INSERT INTO rayern_snapshots')) {
+        snapshots.add(String(params?.[0]))
         return []
-      }),
+      }
+      return []
+    })
+    vi.doMock('../db', () => ({
+      query: mockQuery,
+      db: { query: mockQuery },
+      // Ingestion runs inside one transaction; the mock executes it directly so
+      // the assertions still see every statement the real code would run.
+      withTransaction: vi.fn(async (fn: (tx: { query: typeof mockQuery }) => Promise<unknown>) =>
+        fn({ query: mockQuery }),
+      ),
     }))
     // Ensure we use the real ingestion implementation (previous describe mocked it).
     vi.doMock('../rayernIngestion', async () => await vi.importActual<typeof import('../rayernIngestion')>('../rayernIngestion'))

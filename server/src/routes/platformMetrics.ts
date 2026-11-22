@@ -23,8 +23,9 @@ interface AccountsAggregate {
   newAccounts30d: number
   verifiedAccounts: number
   unverifiedAccounts: number
-  deletedAccounts30d: number
-  deletionRequestsPending: number
+  /** `null` = Rayern does not measure deletion accounting — never a measured 0. */
+  deletedAccounts30d: number | null
+  deletionRequestsPending: number | null
   registrationsTrend: Array<{ date: string; count: number }>
   planBreakdown: Array<{ plan: string; count: number }>
 }
@@ -123,8 +124,10 @@ router.get('/overview', async (_req, res, next) => {
         unverifiedAccounts: a.unverifiedAccounts,
         deletedAccounts30d: a.deletedAccounts30d,
         deletionRequestsPending: a.deletionRequestsPending,
-        totalWorkspaces: w?.totalWorkspaces ?? 0,
-        newWorkspaces30d: w?.newWorkspaces30d ?? 0,
+        // Workspaces are only known when the aggregate carried them; absent
+        // workspace data is null (not a fabricated 0 total).
+        totalWorkspaces: w?.totalWorkspaces ?? null,
+        newWorkspaces30d: w?.newWorkspaces30d ?? null,
         registrationsTrend: a.registrationsTrend,
         planBreakdown: orderPlans(planEntries),
         dataSource: 'rayern-sync' as const,

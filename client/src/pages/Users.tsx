@@ -1,52 +1,111 @@
 import { useState } from 'react'
 import { Card, CardBody, CardHeader } from '../components/ui/Card'
 import { KpiCard } from '../components/KpiCard'
-import { SearchInput } from '../components/SearchInput'
 import { Pagination } from '../components/Pagination'
 import { Badge, StatusBadge } from '../components/ui/Badge'
 import { EmptyState, ErrorState, LoadingBlock } from '../components/ui/states'
 import { Select } from '../components/ui/Input'
-import { usersService } from '../services/users'
-import { useDebouncedValue } from '../hooks/useDebouncedValue'
 import { useQuery } from '../hooks/useQuery'
 import { usePageRefresh } from '../hooks/usePageRefresh'
-import { formatDate, formatNumber, initialsOf } from '../lib/utils'
-import type { AccountStatus, Paged, User, VerificationStatus } from '../lib/types'
-
-const PAGE_SIZE = 12
+import { usersService } from '../services/users'
+import { formatCount, formatDate, formatNumber, initialsOf } from '../lib/utils'
+import {
+  RAYERN_PLANS,
+  SUBSCRIPTION_STATUSES,
+  type AdminUserFilters,
+  type AdminUserRecord,
+  type ConsentFilter,
+  type RayernPlan,
+  type SubscriptionStatus,
+} from '../lib/types'
 
 /**
- * Account administration: basic account-level info only.
- * A user record is never a gateway into a customer's workspace content —
- * there are no drill-downs into clients, projects, tasks, or activity.
+ * Accounts directory, read from the Rayern admin-users API through the
+ * dashboard's existing proxy (`GET /api/v1/admin/users`).
+ *
+ * The previous implementation read the dashboard's local `accounts` table,
+ * which nothing populates in production, so totals were non-zero while the list
+ * was always empty. Rayern is the authoritative source of accounts; this page
+ * asks it directly (server-side, paginated) instead of maintaining a second,
+ * empty directory.
+ *
+ * Only filters Rayern's contract actually supports are offered — plan,
+ * subscription status and marketing consent. Free-text search and
+ * verification-status filtering are NOT part of that contract, so they are
+ * deliberately absent rather than filtering just the current page and implying
+ * a whole-directory result.
+ *
+ * Privacy: account-level administration fields only. There is no drill-down
+ * into workspace content, and no password/token field is ever rendered.
  */
-export function UsersPage() {
-  const [search, setSearch] = useState('')
-  const [verification, setVerification] = useState<VerificationStatus | 'all'>('all')
-  const [status, setStatus] = useState<AccountStatus | 'all'>('all')
-  const [page, setPage] = useState(1)
-  const debouncedSearch = useDebouncedValue(search)
+const PAGE_SIZE = 25
 
-  // Reset to page 1 when the filters change — adjusted during render so the
-  // list query runs exactly once with (new filters, page 1). The previous
-  // effect-based reset ran *after* the list effect, firing a wasted request
-  // with (new filters, stale page) whose response was then discarded.
-  const filterKey = `${debouncedSearch}\u0000${verification}\u0000${status}`
+function fullName(user: AdminUserRecord): string {
+  const name = [user.firstName, user.lastName].filter(Boolean).join(' ').trim()
+  return name || user.email
+}
+
+function verificationBadge(user: AdminUserRecord) {
+  if (user.emailVerified === true) return <StatusBadge tone="green">Verified</StatusBadge>
+  if (user.emailVerified === false) return <StatusBadge tone="red">Unverified</StatusBadge>
+  // Absent is unknown, not "unverified".
+  return <Badge tone="neutral">Not reported</Badge>
+}
+
+function accountStatusBadge(user: AdminUserRecord) {
+  switch ((user.accountStatus ?? '').toLowerCase()) {
+    case 'active':
+      return <StatusBadge tone="green">Active</StatusBadge>
+    case 'suspended':
+      return <StatusBadge tone="amber">Suspended</StatusBadge>
+    case 'closed':
+      return <Badge tone="neutral">Closed</Badge>
+    default:
+      return <span className="text-ink-500">—</span>
+  }
+}
+
+function subscriptionBadge(user: AdminUserRecord) {
+  const status = user.subscription?.status ?? null
+  if (status === null) return <Badge tone="neutral">Free</Badge>
+  const tone = status === 'active' ? 'green' : status === 'past_due' ? 'amber' : status === 'none' ? 'neutral' : 'amber'
+  return <Badge tone={tone}>{status.replace(/_/g, ' ')}</Badge>
+}
+
+export function UsersPage() {
+  const [plan, setPlan] = useState<RayernPlan | 'all'>('all')
+  const [subscriptionStatus, setSubscriptionStatus] = useState<SubscriptionStatus | 'all'>('all')
+  const [consent, setConsent] = useState<ConsentFilter | 'all'>('all')
+  const [page, setPage] = useState(1)
+
+  // Reset to page 1 when a filter changes, during render so the directory query
+  // runs once with (new filters, page 1) instead of twice.
+  const filterKey = `${plan}\u0000${subscriptionStatus}\u0000${consent}`
   const [prevFilterKey, setPrevFilterKey] = useState(filterKey)
   if (prevFilterKey !== filterKey) {
     setPrevFilterKey(filterKey)
     setPage(1)
   }
 
+  const filters: AdminUserFilters = {
+    page,
+    limit: PAGE_SIZE,
+    plan,
+    subscriptionStatus,
+    consent,
+  }
+
+  // KPIs come from the synchronized Rayern snapshot aggregates; the directory
+  // itself comes live from the admin-users API. Both are Rayern-sourced.
   const statsQ = useQuery(() => usersService.stats())
-  const listQ = useQuery(
-    () => usersService.list({ search: debouncedSearch, verification, status, page, pageSize: PAGE_SIZE }),
-    [debouncedSearch, verification, status, page],
-  )
-  // Navbar refresh re-runs exactly these queries, keeping search, filters and page.
+  const listQ = useQuery(() => usersService.directory(filters), [plan, subscriptionStatus, consent, page])
   usePageRefresh([statsQ, listQ])
 
-  const data: Paged<User> | null = listQ.data
+  const pageData = listQ.data
+  const users = pageData?.users ?? []
+  const totalResults = pageData?.pagination.totalResults ?? 0
+  const currentPage = pageData?.pagination.page ?? page
+  const pageSize = pageData?.pagination.limit ?? PAGE_SIZE
 
   return (
     <div className="mx-auto max-w-7xl space-y-6 p-6">
@@ -55,37 +114,54 @@ export function UsersPage() {
         <KpiCard label="New (7d)" value={statsQ.data ? formatNumber(statsQ.data.newUsers7d) : '—'} />
         <KpiCard label="Verified" value={statsQ.data ? formatNumber(statsQ.data.verified) : '—'} tone="green" />
         <KpiCard label="Unverified" value={statsQ.data ? formatNumber(statsQ.data.unverified) : '—'} tone="amber" />
-        <KpiCard label="Deletions (30d)" value={statsQ.data ? formatNumber(statsQ.data.deleted30d) : '—'} />
+        <KpiCard
+          label="Deletions (30d)"
+          value={statsQ.data ? formatCount(statsQ.data.deleted30d) : '—'}
+          sub={statsQ.data && statsQ.data.deleted30d === null ? 'not measured by Rayern' : undefined}
+        />
       </div>
 
       <Card>
         <CardHeader
           title="Accounts"
-          subtitle="Basic account information for platform administration — no workspace content access"
+          subtitle="Live directory from Rayern's admin API — account-level administration data only, no workspace content"
           actions={
             <div className="flex flex-wrap items-center gap-2">
-              <SearchInput value={search} onChange={setSearch} placeholder="Search name or email…" className="w-64" />
               <Select
-                aria-label="Filter by verification status"
-                value={verification}
-                onChange={(e) => setVerification(e.target.value as VerificationStatus | 'all')}
-                className="w-40"
+                aria-label="Filter by plan"
+                value={plan}
+                onChange={(e) => setPlan(e.target.value as RayernPlan | 'all')}
+                className="w-36"
               >
-                <option value="all">All verification</option>
-                <option value="verified">Verified</option>
-                <option value="unverified">Unverified</option>
-                <option value="pending">Pending</option>
+                <option value="all">All plans</option>
+                {RAYERN_PLANS.map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
               </Select>
               <Select
-                aria-label="Filter by account status"
-                value={status}
-                onChange={(e) => setStatus(e.target.value as AccountStatus | 'all')}
+                aria-label="Filter by subscription status"
+                value={subscriptionStatus}
+                onChange={(e) => setSubscriptionStatus(e.target.value as SubscriptionStatus | 'all')}
+                className="w-44"
+              >
+                <option value="all">All subscription states</option>
+                {SUBSCRIPTION_STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {s.replace(/_/g, ' ')}
+                  </option>
+                ))}
+              </Select>
+              <Select
+                aria-label="Filter by marketing consent"
+                value={consent}
+                onChange={(e) => setConsent(e.target.value as ConsentFilter | 'all')}
                 className="w-40"
               >
-                <option value="all">All statuses</option>
-                <option value="active">Active</option>
-                <option value="suspended">Suspended</option>
-                <option value="closed">Closed</option>
+                <option value="all">All consent</option>
+                <option value="opted_in">Opted in</option>
+                <option value="opted_out">Opted out</option>
               </Select>
             </div>
           }
@@ -96,8 +172,15 @@ export function UsersPage() {
           </CardBody>
         ) : listQ.error ? (
           <ErrorState message={listQ.error} onRetry={listQ.refetch} />
-        ) : !data || data.items.length === 0 ? (
-          <EmptyState title="No accounts found" description="Try adjusting your search or filters." />
+        ) : users.length === 0 ? (
+          <EmptyState
+            title="No accounts match"
+            description={
+              totalResults === 0 && plan === 'all' && subscriptionStatus === 'all' && consent === 'all'
+                ? 'Rayern returned no accounts for this directory. If this is unexpected, check the Rayern admin API configuration on the backend.'
+                : 'Rayern returned no accounts for these filters. Adjust the plan, subscription or consent filter.'
+            }
+          />
         ) : (
           <>
             <div className="overflow-x-auto">
@@ -107,50 +190,52 @@ export function UsersPage() {
                     <th scope="col" className="px-4 py-2.5">Account</th>
                     <th scope="col" className="px-3 py-2.5">Verification</th>
                     <th scope="col" className="px-3 py-2.5">Status</th>
+                    <th scope="col" className="px-3 py-2.5">Plan</th>
+                    <th scope="col" className="px-3 py-2.5">Subscription</th>
                     <th scope="col" className="px-3 py-2.5">Registered</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {data.items.map((u) => (
-                    <tr key={u.id} className="border-b border-ink-100 last:border-0 hover:bg-ink-50/70">
+                  {users.map((u) => (
+                    <tr key={String(u.id)} className="border-b border-ink-100 last:border-0 hover:bg-ink-50/70">
                       <td className="px-4 py-2.5">
                         <div className="flex items-center gap-3">
                           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ink-100 text-xs font-semibold text-ink-600">
-                            {initialsOf(u.name)}
+                            {initialsOf(fullName(u))}
                           </span>
                           <div className="min-w-0">
-                            <p className="truncate font-medium text-ink-900">{u.name}</p>
+                            <p className="truncate font-medium text-ink-900">{fullName(u)}</p>
                             <p className="truncate text-xs text-ink-500">{u.email}</p>
                           </div>
                         </div>
                       </td>
-                      <td className="px-3 py-2.5">
-                        {u.verification === 'verified' ? (
-                          <StatusBadge tone="green">Verified</StatusBadge>
-                        ) : u.verification === 'unverified' ? (
-                          <StatusBadge tone="red">Unverified</StatusBadge>
-                        ) : (
-                          <Badge tone="amber">Pending</Badge>
-                        )}
+                      <td className="px-3 py-2.5">{verificationBadge(u)}</td>
+                      <td className="px-3 py-2.5">{accountStatusBadge(u)}</td>
+                      <td className="px-3 py-2.5 capitalize text-ink-700">
+                        {u.workspace?.plan ?? u.subscription?.plan ?? '—'}
                       </td>
-                      <td className="px-3 py-2.5">
-                        {u.status === 'active' ? (
-                          <StatusBadge tone="green">Active</StatusBadge>
-                        ) : u.status === 'suspended' ? (
-                          <StatusBadge tone="amber">Suspended</StatusBadge>
-                        ) : (
-                          <Badge tone="neutral">Closed</Badge>
-                        )}
-                      </td>
-                      <td className="px-3 py-2.5 text-ink-600">{formatDate(u.createdAt)}</td>
+                      <td className="px-3 py-2.5">{subscriptionBadge(u)}</td>
+                      <td className="px-3 py-2.5 text-ink-600">{u.createdAt ? formatDate(u.createdAt) : '—'}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-            <Pagination page={data.page} pageSize={data.pageSize} total={data.total} onPageChange={setPage} />
+            <Pagination
+              page={currentPage}
+              pageSize={pageSize}
+              total={totalResults}
+              onPageChange={setPage}
+            />
           </>
         )}
+        <div className="border-t border-ink-100 px-4 py-2.5">
+          <p className="text-xs text-ink-500">
+            Source: Rayern <code className="rounded bg-ink-100 px-1">GET /api/v1/admin/users</code>, proxied
+            server-side. Filters are applied by Rayern, not in the browser. Free-text search and verification-status
+            filtering are not part of that API, so they are not offered here.
+          </p>
+        </div>
       </Card>
     </div>
   )

@@ -27,6 +27,19 @@ const untrackedNum = z.preprocess(
   z.number().min(0),
 )
 
+/**
+ * A count that may be genuinely unmeasured upstream.
+ *
+ * `null` / absent → `null` (NOT 0). Rayern does not track deletion accounting,
+ * so `deletedAccounts30d` and `deletionRequestsPending` must stay unavailable
+ * rather than being reported as a measured zero. A real 0 the producer sends
+ * explicitly is preserved as 0.
+ */
+const nullableCount = z.preprocess(
+  (v) => (v === undefined ? null : v),
+  z.number().int().min(0).nullable(),
+)
+
 const untrackedList = <S extends z.ZodTypeAny>(inner: S, max: number) =>
   z.preprocess(
     (v) => (v === null || v === undefined ? [] : v),
@@ -58,11 +71,10 @@ export const SyncPayload = z.object({
       newAccounts30d: untrackedInt,
       verifiedAccounts: untrackedInt,
       unverifiedAccounts: untrackedInt,
-      // Nullable-in-transit, but ALWAYS normalized to a number: the aggregate
-      // contract (and every consumer of it, e.g. platform-metrics) treats these
-      // as counts, so null must never reach storage or the API response.
-      deletedAccounts30d: untrackedInt,
-      deletionRequestsPending: untrackedInt,
+      // Truly optional measurements: null survives to storage and to the API
+      // so the UI can say "not measured" instead of inventing a zero.
+      deletedAccounts30d: nullableCount,
+      deletionRequestsPending: nullableCount,
       registrationsTrend: untrackedList(
         z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), count: untrackedInt }),
         400,
@@ -84,7 +96,13 @@ export const SyncPayload = z.object({
     .transform((v) => v ?? undefined),
   billing: z
     .object({
-      currency: z.literal('USD'),
+      // Validated ISO-4217 code — Rayern's configured currency, not an assumed
+      // one. Amounts are always minor units of THIS currency and are never
+      // converted by the dashboard.
+      currency: z.preprocess(
+        (v) => (typeof v === 'string' ? v.trim().toUpperCase() : v),
+        z.string().regex(/^[A-Z]{3}$/, 'currency must be a 3-letter ISO-4217 code'),
+      ),
       amountUnit: z.literal('minor_units'),
       generatedAt: z.string().datetime(),
       activePaidSubscribers: z.number().int().min(0),
@@ -177,11 +195,11 @@ export function unwrapRayernEnvelope(raw: unknown): { ok: true; value: unknown }
  * Billing is stored under its own key so it can be refreshed independently
  * without disturbing accounts/workspaces.
  */
-export async function storePayload(data: SyncPayloadData): Promise<string[]> {
+export async function storePayload(data: SyncPayloadData, exec: SqlExecutor = db): Promise<string[]> {
   const sections: string[] = []
 
   const upsertState = async (key: string, value: unknown): Promise<void> => {
-    await query(
+    await exec.query(
       `INSERT INTO rayern_sync_state (key, payload, updated_at)
        VALUES ($1, $2, now())
        ON CONFLICT (key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`,
@@ -206,7 +224,7 @@ export async function storePayload(data: SyncPayloadData): Promise<string[]> {
 
   if (data.services !== undefined && data.services.length > 0) {
     for (const s of data.services) {
-      await query(
+      await exec.query(
         `INSERT INTO service_health (service, kind, status, uptime_pct_30d, latency_p50, latency_p95, last_incident_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (service, kind) DO UPDATE SET
@@ -377,11 +395,14 @@ export function extractInstrumentation(raw: unknown): {
 }
 
 /** Persists instrumentation blocks under their own `rayern_sync_state` keys. */
-export async function storeInstrumentation(blocks: InstrumentationBlocks): Promise<InstrumentationKey[]> {
+export async function storeInstrumentation(
+  blocks: InstrumentationBlocks,
+  exec: SqlExecutor = db,
+): Promise<InstrumentationKey[]> {
   const stored: InstrumentationKey[] = []
   for (const key of INSTRUMENTATION_KEYS) {
     if (!Object.prototype.hasOwnProperty.call(blocks, key)) continue
-    await query(
+    await exec.query(
       `INSERT INTO rayern_sync_state (key, payload, updated_at)
        VALUES ($1, $2, now())
        ON CONFLICT (key) DO UPDATE SET payload = EXCLUDED.payload, updated_at = now()`,
@@ -485,7 +506,7 @@ export async function writeCachedRayernLogs(
 
 
 // Re-export query because this module already owns the persistence helpers.
-import { query } from './db'
+import { query, db, type SqlExecutor } from './db'
 import { config, rayernSyncEnabled } from './config'
 
 /* ------------------- Restored payload/sync observability ------------------ */
@@ -585,8 +606,8 @@ async function markSuccess(sections: string[], durationMs: number, httpStatus: n
  * pull worker's own failure state is deliberately left untouched: delivering
  * data does not prove the outbound pull is healthy.
  */
-export async function markPushSyncSuccess(): Promise<void> {
-  await query(
+export async function markPushSyncSuccess(exec: SqlExecutor = db): Promise<void> {
+  await exec.query(
     `UPDATE sync_status
      SET last_success_at = now(), last_success_transport = 'push', updated_at = now()
      WHERE id = 1`,
@@ -1111,6 +1132,15 @@ export function startWakeupWorker(): void {
     console.log('[dashboard-sync] RAYERN_WAKEUP_ENDPOINT not configured — wake/push disabled')
     return
   }
+  // The independent scheduler service owns the periodic wake schedule. The
+  // in-process loop stays available only as a documented recovery path, and is
+  // off by default so two schedules can never fire at Rayern simultaneously.
+  if (!config.rayern.wakeupSchedulerEnabled) {
+    console.log(
+      '[dashboard-sync] periodic wake loop disabled — the independent scheduler owns the schedule (set RAYERN_DASHBOARD_WAKE_SCHEDULER=1 only as a recovery path)',
+    )
+    return
+  }
   console.log(`[dashboard-sync] wake/push enabled → POST ${config.rayern.wakeupEndpoint} every ${formatIntervalMs(config.rayern.wakeupIntervalMs)}`)
   setTimeout(() => void triggerRayernWake('boot'), 10_000).unref()
   setInterval(() => void triggerRayernWake('scheduled'), config.rayern.wakeupIntervalMs).unref()
@@ -1137,6 +1167,15 @@ export async function getSyncStatus(): Promise<{
   dataUpdatedAt: string | null
   intervalMs: number
   rateLimitedUntil: string | null
+  /** Which transports are actually configured: pull / push / both / none. */
+  transport: 'push' | 'pull' | 'both' | 'none'
+  pullEnabled: boolean
+  pushEnabled: boolean
+  wakeEnabled: boolean
+  /** Window after which the newest successful snapshot counts as stale. */
+  freshnessWindowMs: number
+  /** Cadence the deployment is expected to deliver data on. */
+  expectedIntervalMs: number
 }> {
   let row: SyncStatusRow | null = null
   try {
@@ -1158,16 +1197,38 @@ export async function getSyncStatus(): Promise<{
     dataUpdatedAt = null
   }
   const lastSuccessAt = row?.last_success_at?.toISOString() ?? null
+
+  // Transport awareness. Push delivery is a first-class transport, so staleness
+  // must NOT depend on a pull endpoint existing: a push-only deployment becomes
+  // stale when no successful snapshot has arrived inside the freshness window.
+  const pullEnabled = rayernSyncEnabled()
+  const pushEnabled = Boolean(process.env.RAYERN_SNAPSHOT_TOKEN?.trim())
+  const wakeEnabled = Boolean(config.rayern.wakeupEndpoint)
+  const enabled = pullEnabled || pushEnabled || wakeEnabled
+  // A pull deployment is expected every RAYERN_SYNC_INTERVAL_MS; a push/wake
+  // deployment is expected every RAYERN_SNAPSHOT_INTERVAL_MS (2h by default).
+  const expectedIntervalMs = pullEnabled ? config.rayern.intervalMs : config.rayern.snapshotIntervalMs
+  const freshnessWindowMs = pullEnabled ? config.rayern.intervalMs * 2.5 : config.rayern.snapshotStaleMs
   const stale =
-    rayernSyncEnabled() &&
-    (lastSuccessAt === null || Date.now() - new Date(lastSuccessAt).getTime() > config.rayern.intervalMs * 2.5)
-  // Push delivery is a first-class transport: sync is "enabled" when either the
-  // outbound pull or a push ingestion token is configured.
-  const pushEnabled = Boolean(
-    process.env.RAYERN_SNAPSHOT_TOKEN?.trim() || process.env.RAYERN_MONITORING_TOKEN?.trim(),
-  )
+    enabled &&
+    (lastSuccessAt === null || Date.now() - new Date(lastSuccessAt).getTime() > freshnessWindowMs)
+  const transport: 'push' | 'pull' | 'both' | 'none' =
+    pullEnabled && (pushEnabled || wakeEnabled)
+      ? 'both'
+      : pullEnabled
+        ? 'pull'
+        : pushEnabled || wakeEnabled
+          ? 'push'
+          : 'none'
+
   return {
-    enabled: rayernSyncEnabled() || pushEnabled,
+    enabled,
+    transport,
+    pullEnabled,
+    pushEnabled,
+    wakeEnabled,
+    freshnessWindowMs,
+    expectedIntervalMs,
     lastAttemptAt: row?.last_attempt_at?.toISOString() ?? null,
     lastSuccessAt,
     lastSuccessTransport: row?.last_success_transport ?? null,
@@ -1179,7 +1240,7 @@ export async function getSyncStatus(): Promise<{
     lastDurationMs: row?.last_duration_ms ?? null,
     lastHttpStatus: row?.last_http_status ?? lastHttpStatus,
     dataUpdatedAt,
-    intervalMs: config.rayern.intervalMs,
+    intervalMs: expectedIntervalMs,
     rateLimitedUntil: rateLimitedUntil > Date.now() ? new Date(rateLimitedUntil).toISOString() : null,
   }
 }

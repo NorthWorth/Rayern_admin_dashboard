@@ -302,7 +302,9 @@ export function normalizeFunnel(raw: Record<string, unknown>): FunnelDto {
     const row = asObject(entry)
     if (!row) continue
     const source = readString(row, ['source', 'name', 'label', 'value'])
-    const count = readNumber(row, ['count', 'total', 'visits', 'occurrences'])
+    // Rayern's producer emits `{ source, visitors }` for funnel.topSources.
+    // `visitors` is the contract field; the others remain tolerated aliases.
+    const count = readNumber(row, ['visitors', 'count', 'total', 'visits', 'occurrences'])
     if (source === null || count === null) continue
     topSources.push({ source, count })
   }
@@ -659,7 +661,8 @@ export function normalizeEngagement(raw: Record<string, unknown>): EngagementDto
     if (!row) continue
     const date = readString(row, ['date', 'day'])
     if (!date) continue
-    daily.push({ date, count: readNumber(row, ['count', 'activeUsers', 'value', 'dau']) })
+    // Rayern emits `engagement.dailyActiveUsers[] = { date, users }`.
+    daily.push({ date, count: readNumber(row, ['users', 'count', 'activeUsers', 'value', 'dau']) })
   }
 
   const cohorts: EngagementCohort[] = []
@@ -668,7 +671,8 @@ export function normalizeEngagement(raw: Record<string, unknown>): EngagementDto
     if (!row) continue
     const weekStart = readString(row, ['weekStart', 'start', 'cohort', 'week', 'date'])
     if (!weekStart) continue
-    const size = readNumber(row, ['size', 'registered', 'count', 'total'])
+    // Rayern emits `engagement.cohorts[] = { weekStart, usersRegistered, … }`.
+    const size = readNumber(row, ['usersRegistered', 'size', 'registered', 'count', 'total'])
     const retainedNextWeek = readNumber(row, ['retainedNextWeek', 'retained', 'nextWeek', 'returning'])
     const retentionPct = readNumber(row, ['retentionPct', 'retention', 'retainedPct'])
     cohorts.push({

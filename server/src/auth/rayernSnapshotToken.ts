@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express'
+import { constantTimeEqual } from './constantTimeEqual'
 
 /**
  * Fail-closed service-token guard for the Rayern push-ingestion endpoint.
@@ -27,8 +28,9 @@ export function requireRayernSnapshotToken(req: Request, res: Response, next: Ne
     return
   }
 
+  // Constant-time: a byte-wise `!==` leaks how much of the token matched.
   const token = header.slice('Bearer '.length)
-  if (token !== expected) {
+  if (!constantTimeEqual(token, expected)) {
     res.status(401).json({
       success: false,
       error: { code: 'SNAPSHOT_TOKEN_INVALID', message: 'Invalid snapshot token' },

@@ -35,14 +35,30 @@ export function SettingsPage() {
       note: 'Comparisons use the equivalent preceding window when the source covers it',
     },
     {
-      label: 'Rayern pull-sync',
-      value: sync ? (sync.enabled ? 'Enabled' : 'Disabled') : 'Unknown',
-      note: sync?.enabled ? 'Dashboard pulls aggregates from Rayern; Rayern never calls the dashboard' : 'Set RAYERN_SYNC_ENDPOINT on the backend to enable',
+      // Configuration-driven: the label reflects the transport the backend
+      // actually reports, not a hard-coded pull-only assumption.
+      label: 'Snapshot transport',
+      value: sync
+        ? sync.transport === 'both'
+          ? 'Push + pull'
+          : sync.transport === 'push'
+            ? 'Push (Rayern → dashboard)'
+            : sync.transport === 'pull'
+              ? 'Pull (dashboard → Rayern)'
+              : 'Not configured'
+        : 'Unknown',
+      note: sync?.enabled
+        ? `Rayern generates snapshots and the dashboard persists them; the scheduler wakes Rayern every ${Math.round((sync.expectedIntervalMs ?? 0) / 60_000)}m. The frontend only ever reads this dashboard's own database.`
+        : 'Configure RAYERN_SNAPSHOT_TOKEN for push ingestion, RAYERN_WAKEUP_ENDPOINT for the external scheduler, or RAYERN_SYNC_ENDPOINT for the legacy pull fallback',
     },
     {
       label: 'Sync status',
       value: sync ? titleCase(sync.status) : 'Unknown',
-      note: sync?.lastSuccessAt ? `Last successful pull recorded by the backend` : undefined,
+      note: sync?.lastSuccessAt
+        ? `Last successful snapshot (${sync.lastSuccessTransport ?? 'unknown transport'}) ${new Date(sync.lastSuccessAt).toLocaleString()}`
+        : sync?.lastAttemptAt
+          ? 'No successful snapshot yet; attempts have been recorded'
+          : undefined,
     },
     {
       label: 'Aggregated metrics source',
@@ -104,8 +120,10 @@ export function SettingsPage() {
               <span className="font-medium text-ink-900">10 / 15 minutes / IP</span>
             </li>
             <li className="flex items-center justify-between gap-3">
-              <span>Rayern pull-sync window</span>
-              <span className="font-medium text-ink-900">30 minutes between pulls</span>
+              <span>Expected snapshot cadence</span>
+              <span className="font-medium text-ink-900">
+                {sync?.expectedIntervalMs ? `${Math.round(sync.expectedIntervalMs / 60_000)} minutes` : 'Not configured'}
+              </span>
             </li>
             <li className="flex items-center justify-between gap-3">
               <span>429 responses</span>

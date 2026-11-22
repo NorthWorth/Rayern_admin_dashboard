@@ -7,9 +7,11 @@
     "dev": "sh ./scripts/dev-full.sh",
     "dev:client": "cd client && bun run dev",
     "dev:server": "cd server && bun run dev",
+    "dev:scheduler": "cd scheduler && bun run dev",
     "build": "cd client && bun run build",
-    "typecheck": "cd client && bun tsc -b --noEmit && cd ../server && bun tsc --noEmit",
-    "check": "npm run typecheck",
+    "typecheck": "cd client && bun tsc -b --noEmit && cd ../server && bun tsc --noEmit && cd ../scheduler && bun tsc --noEmit",
+    "test": "cd server && bun run test && cd ../client && bun run test && cd ../scheduler && bun run test",
+    "check": "npm run typecheck && npm run test",
     "smoke": "cd server && bun run smoke"
   }
 }

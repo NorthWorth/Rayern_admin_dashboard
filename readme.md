@@ -4,40 +4,35 @@ A standalone internal administration and observability console for Rayern. This 
 
 ## Architecture
 
+Rayern is the authoritative source of customer and product data. This dashboard
+receives aggregate snapshots from Rayern, stores them in its own database and
+serves its own frontend from local data. An independent scheduler service
+(`scheduler/`) initiates Rayern's snapshot-generation workflow on a fixed
+cadence.
+
 ```
-                         RAYERN
-                    Existing Application
-                           │
-                           │  asynchronous GET
-                           ▼
-                 ┌─────────────────────┐
-                 │ Dashboard Sync      │
-                 │ Service             │
-                 │                     │
-                 │ server/             │
-                 └──────────┬──────────┘
-                            │
-                            ▼
-                 ┌─────────────────────┐
-                 │ Dashboard           │
-                 │ PostgreSQL          │
-                 └──────────┬──────────┘
-                            │
-                            ▼
-                 ┌─────────────────────┐
-                 │ Dashboard API       │
-                 │ server/             │
-                 └──────────┬──────────┘
-                            │
-                            ▼
-                 ┌─────────────────────┐
-                 │ Dashboard Frontend  │
-                 │ client/             │
-                 └─────────────────────┘
+        scheduler/ (independent service, every 2h by default)
+                     │
+                     │  authenticated POST /internal/dashboard-wakeup
+                     ▼
+                 RAYERN (authoritative product/customer data)
+                     │
+                     │  authenticated POST /internal/dashboard/rayern-snapshot
+                     ▼
+                 Dashboard receiver  →  Zod validation  →  PostgreSQL
+                                                          │
+                                                          ▼
+                                         Dashboard API (local reads only)
+                                                          │
+                                                          ▼
+                                            Dashboard frontend (client/)
 ```
 
-- The frontend (`client/`) never connects to Rayern's database, Rayern's server internals, or Resend directly.
-- The backend (`server/`) periodically pulls approved aggregate metrics from Rayern via an outbound GET request. Rayern never calls the dashboard.
+- The frontend (`client/`) never connects to Rayern, never calls it, and never holds a Rayern credential. It only calls this dashboard's own backend.
+- Ordinary page loads, navigation and the local Update control read the dashboard's own database. They do not trigger Rayern requests.
+- Rayern pushes validated aggregate snapshots; dashboard ingestion is authenticated with `RAYERN_SNAPSHOT_TOKEN`, idempotent and transactional.
+- A legacy dashboard-side pull worker (`RAYERN_SYNC_ENDPOINT`) remains available as a fallback transport; it is not required.
+- The dashboard-owned periodic wake loop is **disabled by default** so only one schedule exists. `RAYERN_DASHBOARD_WAKE_SCHEDULER=1` is a documented recovery path only.
 - Email sending is admin-initiated only. Verification and password-reset emails remain part of Rayern's own application flow and are never sent from this console.
 - The backend uses its own PostgreSQL database (or an embedded PGlite dev database when no DATABASE_URL is configured).
 
@@ -145,7 +140,7 @@ bun run dev:server   # API server only
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `DATABASE_URL` | PostgreSQL connection string (omit for embedded PGlite dev DB) | No |
+| `DATABASE_URL` | PostgreSQL connection string. Omit only for the in-memory PGlite dev DB — in production the API refuses to start without it | No in dev / **Yes in production** |
 | `API_PORT` | Port for the dashboard API | No (default 4000) |
 | `ADMIN_JWT_SECRET` | Secret for signing admin JWT tokens | Yes (auto-generated ephemeral if unset in dev) |
 | `ADMIN_EMAIL` | Bootstrap admin email | Yes |
@@ -157,6 +152,14 @@ bun run dev:server   # API server only
 | `EMAIL_FROM_ADDRESS` | Sender email address | No (default "support@rayern.com.ng") |
 | `CORS_ORIGINS` | Comma-separated allowed origins for production CORS | No (allow all in dev) |
 | `SERVE_STATIC` | Set to `true` to serve the compiled frontend from this API server | No |
+| `RAYERN_SNAPSHOT_TOKEN` | Dedicated bearer token Rayern presents when pushing a snapshot to this dashboard | No (push ingestion fails closed without it) |
+| `RAYERN_WAKEUP_ENDPOINT` | Rayern endpoint the scheduler wakes | No |
+| `RAYERN_DASHBOARD_WAKE_SCHEDULER` | `1` re-enables the legacy in-process wake loop (must not run with the scheduler) | No (default off) |
+| `RAYERN_SNAPSHOT_INTERVAL_MS` | Expected cadence of pushed snapshots (default 2h) | No |
+| `RAYERN_SNAPSHOT_STALE_MS` | Window after which the newest snapshot counts as stale (default 2.5 × cadence) | No |
+| `RAYERN_BILLING_CURRENCY` | Currency the dashboard expects Rayern to report; a mismatch is a diagnostic, never a silent drop | No (no expectation) |
+| `SCHEDULER_STATUS_URL` | Base URL of the independent scheduler's status endpoint (proxied server-side) | No |
+| `SCHEDULER_STATUS_TOKEN` | Read-only credential for the scheduler status endpoint | No |
 | `RAYERN_SYNC_ENDPOINT` | Full URL of the Rayern metrics endpoint the dashboard pulls from | No (sync disabled if empty) |
 | `RAYERN_API_BASE_URL` | Base URL of the Rayern API (used to construct sync endpoint if `RAYERN_SYNC_ENDPOINT` is empty) | No |
 | `RAYERN_MONITORING_TOKEN` | Bearer token sent to Rayern for the sync endpoint | No |
@@ -186,15 +189,19 @@ When no API URL is configured (`VITE_ADMIN_API_URL` unset), the frontend shows d
 
 ## Rayern synchronization
 
-The dashboard periodically pulls approved aggregate metrics from the Rayern API. This is a **pull-based** architecture:
+Snapshots are **pushed** by Rayern and stored locally:
 
-- The dashboard's sync worker (`server/src/rayernSync.ts`) makes outbound GET requests to the configured Rayern endpoint.
-- Rayern never calls the dashboard, never pushes data, and never waits for the dashboard.
-- The sync is completely independent — if the dashboard is down, Rayern continues operating normally.
-- Only privacy-safe aggregate data is accepted (Zod validation strips any unexpected fields).
-- Previously synchronized data is retained during outages; stale data is clearly indicated.
+- The independent scheduler (`scheduler/`) POSTs Rayern's wake endpoint every `SCHEDULER_INTERVAL_MS` (default two hours). Rayern generates an aggregate snapshot and pushes it to `POST /internal/dashboard/rayern-snapshot`.
+- Ingestion authenticates with `RAYERN_SNAPSHOT_TOKEN`, validates with Zod (unknown fields are stripped), guarantees idempotency and out-of-order protection, and writes every section plus its bookkeeping in **one transaction**. A failed ingestion leaves the previous snapshot intact.
+- The frontend reads the dashboard database only. It never tells Rayern anything happened.
+- Staleness is transport-aware: a push-only deployment becomes stale when no successful snapshot arrives within `RAYERN_SNAPSHOT_STALE_MS` (default 2.5 × the 2-hour cadence).
+- Previously synchronized data is retained during outages and stale data is explicitly flagged.
 
-Configure the sync by setting `RAYERN_SYNC_ENDPOINT` and `RAYERN_MONITORING_TOKEN` on the backend.
+Optional legacy pull transport: set `RAYERN_SYNC_ENDPOINT` + `RAYERN_MONITORING_TOKEN`
+and the dashboard will also pull on `RAYERN_SYNC_INTERVAL_MS`.
+
+Scheduler setup, environment variables and the Render edge-challenge behaviour
+are documented in [`scheduler/README.md`](scheduler/README.md).
 
 ## Email system
 
@@ -275,7 +282,7 @@ Starts the API (embedded PGlite), exercises all endpoints (auth, users, workspac
 ## Sections
 
 - **Overview** — aggregate platform KPIs (accounts, workspaces, registrations, deletions, email volume, system status), registration trend, service health, recent admin-sent email activity.
-- **Users** — searchable, filterable account administration table (verification status, account status, registration date) with no workspace-content drill-downs.
+- **Users** — account administration table read live from Rayern's `GET /api/v1/admin/users` through the dashboard proxy (paginated, filtered server-side by plan / subscription status / marketing consent, which is everything that API supports). Shows account, verification state, account status, plan, subscription status and registration date. The local `accounts` table is not a user directory and is no longer used for this list.
 - **Workspaces** — aggregate registration metadata only: name, member count, plan, creation date. No owners' emails, contents, or activity.
 - **Platform Metrics** — privacy-safe aggregates: registered accounts, new registrations over time, verified vs unverified, deletions, pending deletion requests, workspace totals and plan breakdown.
 - **Revenue** — financial/subscription metrics reported by Rayern (`billing` block of `GET /api/v1/admin/metrics`): MRR, ARR, active paid subscribers, free users, MRR by plan, plan/subscription breakdown, currency, data freshness (Rayern `generatedAt` + last successful sync) with explicit loading, unavailable and error states. Values are rendered exactly as reported — never recalculated client-side, never fabricated as zeros.

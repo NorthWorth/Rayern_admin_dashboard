@@ -3,9 +3,16 @@
  * for recipient selection and campaigns
  * (docs/ADMIN_DASHBOARD_BILLING_CONTRACT.md §4 and §5):
  *
- *   GET  /api/v1/admin/users              (page/limit/plan/subscriptionStatus/consent)
- *   POST /api/v1/admin/campaigns/preview  ({ audience })
- *   POST /api/v1/admin/campaigns/send     ({ subject, bodyHtml, audience, idempotencyKey })
+ *   GET   /api/v1/admin/users              (page/limit/plan/subscriptionStatus/consent)
+ *   POST  /api/v1/admin/campaigns/preview ({ audience })
+ *   POST  /api/v1/admin/campaigns/send    ({ subject, bodyHtml, audience, idempotencyKey })
+ *   GET   /api/v1/admin/feedback          (page/limit/category/status/sort)
+ *   GET   /api/v1/admin/feedback/summary  (aggregate counts only, never bodies)
+ *   PATCH /api/v1/admin/feedback/:id      ({ status })
+ *
+ * Every one of these is admin-only on both sides: the dashboard requires
+ * requireAuth + requireAdmin, and Rayern repeats requireAuth + requireAdmin, so
+ * there is no path on which a non-administrator reaches customer feedback.
  *
  * Design rules:
  *  - Requests and responses are forwarded VERBATIM to Rayern. No field is
@@ -27,6 +34,7 @@ import type { Response as ExpressResponse } from 'express'
 import { z } from 'zod'
 import { config, rayernAdminProxyEnabled } from '../config'
 import { requireAuth, requireAdmin } from '../auth'
+import { adminActor, recordAudit } from '../audit'
 import { logOutboundRayern } from '../requestContext'
 
 const router = Router()
@@ -144,7 +152,7 @@ interface UpstreamResponse {
 
 /** Forwards an authenticated request to Rayern, re-login once on 401. */
 async function forwardToRayern(
-  method: 'GET' | 'POST',
+  method: 'GET' | 'POST' | 'PATCH',
   path: string,
   body?: unknown,
 ): Promise<UpstreamResponse> {
@@ -256,6 +264,31 @@ const UsersQuery = z.object({
   consent: z.enum(['opted_in', 'opted_out']).optional(),
 })
 
+/**
+ * Feedback review queue (Rayern `src/routes/adminRoutes.js` + feedbackController).
+ * `category` is one of Rayern's four stored feedback types, `status` is the
+ * review state, and sorting is `<field>:<dir>`; there is no free-text search
+ * upstream, so none is offered here.
+ */
+const FeedbackCategory = z.enum(['General feedback', 'Feature request', 'Bug report', 'Something is confusing'])
+const FeedbackStatus = z.enum(['open', 'reviewed', 'resolved'])
+
+const FeedbackQuery = z.object({
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  category: FeedbackCategory.optional(),
+  status: FeedbackStatus.optional(),
+  sort: z
+    .string()
+    .regex(/^(createdAt|updatedAt):(asc|desc)$/)
+    .optional(),
+})
+
+const FeedbackUpdateBody = z.object({ status: FeedbackStatus })
+
+/** Mongo ObjectId, exactly as Rayern validates it. */
+const FeedbackId = z.string().regex(/^[0-9a-fA-F]{24}$/)
+
 const PreviewBody = z.object({ audience: Audience })
 
 const SendBody = z.object({
@@ -289,6 +322,87 @@ router.get('/admin/users', requireAuth, requireAdmin, async (req, res) => {
     if (parsed.data.consent !== undefined) params.set('consent', parsed.data.consent)
     const qs = params.toString()
     relay(res, await forwardToRayern('GET', `/api/v1/admin/users${qs ? `?${qs}` : ''}`))
+  } catch (err) {
+    relayError(res, err)
+  }
+})
+
+router.get('/admin/feedback/summary', requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    relay(res, await forwardToRayern('GET', '/api/v1/admin/feedback/summary'))
+  } catch (err) {
+    relayError(res, err)
+  }
+})
+
+router.get('/admin/feedback', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const parsed = FeedbackQuery.safeParse(req.query)
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message:
+            'Invalid feedback query (page ≥ 1, limit 1–100, category from Rayern\'s feedback types, status open|reviewed|resolved, sort createdAt|updatedAt:asc|desc)',
+        },
+      })
+      return
+    }
+    const params = new URLSearchParams()
+    for (const key of ['page', 'limit', 'category', 'status', 'sort'] as const) {
+      const value = parsed.data[key]
+      if (value !== undefined) params.set(key, String(value))
+    }
+    const qs = params.toString()
+    relay(res, await forwardToRayern('GET', `/api/v1/admin/feedback${qs ? `?${qs}` : ''}`))
+  } catch (err) {
+    relayError(res, err)
+  }
+})
+
+/**
+ * Status transition only — the single mutation Rayern supports on feedback.
+ *
+ * The audit record stores the id and the new status. It deliberately does not
+ * contain the category or the message: audit rows are searchable and exportable
+ * from the Audit page, and feedback bodies are customer content that must never
+ * surface there.
+ */
+router.patch('/admin/feedback/:id', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const id = FeedbackId.safeParse(req.params.id)
+    const body = FeedbackUpdateBody.safeParse(req.body)
+    if (!id.success || !body.success) {
+      res.status(400).json({
+        success: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Body must be { status: "open" | "reviewed" | "resolved" } and the id must be a 24-character hex identifier',
+        },
+      })
+      return
+    }
+
+    const upstream = await forwardToRayern('PATCH', `/api/v1/admin/feedback/${id.data}`, body.data)
+
+    // Only a confirmed upstream change is audited; a rejected transition leaves
+    // the audit trail untouched so it reflects what actually happened.
+    if (upstream.status >= 200 && upstream.status < 300) {
+      try {
+        await recordAudit(
+          req.admin ? adminActor(req.admin) : 'unknown-admin',
+          'admin',
+          'feedback.status_update',
+          id.data,
+          { status: body.data.status },
+        )
+      } catch {
+        // Audit bookkeeping never fails a completed administrative action.
+      }
+    }
+
+    relay(res, upstream)
   } catch (err) {
     relayError(res, err)
   }

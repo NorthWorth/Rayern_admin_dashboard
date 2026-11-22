@@ -99,7 +99,14 @@ export function OverviewPage() {
   const sync = systemQ.data?.sync ?? null
   const recentEvents = (auditQ.data ?? []).slice(0, 6)
   const openErrors = errorsQ.data ?? []
-  const consent = marketingQ.data?.consent ?? null
+  // Consent comes from Rayern's authoritative `marketingConsent` aggregate, not
+  // the dashboard's own (unpopulated) marketing tables.
+  const consent = instQ.data?.blocks.marketingConsent ?? null
+  const consentSyncedAt = instQ.data?.syncedAt ?? null
+  const consentUnknown =
+    consent && consent.totalRegisteredUsers !== null && consent.optedIn !== null && consent.optedOut !== null
+      ? Math.max(0, consent.totalRegisteredUsers - consent.optedIn - consent.optedOut)
+      : null
   const funnel = instQ.data?.blocks.funnel ?? null
   const engagement = instQ.data?.blocks.engagement ?? null
 
@@ -384,27 +391,36 @@ export function OverviewPage() {
             <dl className="space-y-2 text-sm">
               <div className="flex items-center justify-between gap-3">
                 <dt className="text-ink-600">Marketable accounts (opted in)</dt>
-                <dd className="font-medium tabular-nums text-ink-900">{formatNumber(marketingQ.data?.mailable ?? 0)}</dd>
+                <dd className="font-medium tabular-nums text-ink-900">{formatCount(consent.optedIn)}</dd>
               </div>
               <div className="flex items-center justify-between gap-3">
                 <dt className="text-ink-600">Opted out</dt>
-                <dd className="font-medium tabular-nums text-ink-900">{formatNumber(consent.optedOut)}</dd>
+                <dd className="font-medium tabular-nums text-ink-900">{formatCount(consent.optedOut)}</dd>
               </div>
               <div className="flex items-center justify-between gap-3">
-                <dt className="text-ink-600">No consent recorded</dt>
-                <dd className="font-medium tabular-nums text-ink-900">{formatNumber(consent.unknown)}</dd>
+                <dt className="text-ink-600">Unknown / not recorded</dt>
+                <dd className="font-medium tabular-nums text-ink-900">{formatCount(consentUnknown)}</dd>
               </div>
               <div className="flex items-center justify-between gap-3 border-t border-ink-100 pt-2">
-                <dt className="text-ink-600">Campaigns sent (30d)</dt>
+                <dt className="text-ink-600">Dashboard campaigns sent (30d)</dt>
                 <dd className="font-medium tabular-nums text-ink-900">
                   {formatNumber(marketingQ.data?.campaigns.sent30d ?? 0)}
                 </dd>
               </div>
             </dl>
           ) : (
-            <LoadingBlock rows={3} />
+            <UnavailablePanel
+              title="Marketing consent"
+              reason={instQ.error ?? rayernReasonText('not_reported')}
+              required="Rayern's `marketingConsent` metrics block, delivered with the aggregate snapshot."
+            />
           )}
-          <MetricNote>Consent is revalidated server-side at send time; only explicit opt-ins are ever mailable.</MetricNote>
+          <MetricNote>
+            Source: Rayern {consentSyncedAt ? `· measured ${formatDateTime(consentSyncedAt)}` : ''}
+            {consent && !consent.reconciles ? ' · flagged: opted-in + opted-out does not equal total accounts' : ''}. Consent is
+            revalidated server-side at send time; only explicit opt-ins are ever mailable. Campaign counts above cover only
+            mail sent from this dashboard.
+          </MetricNote>
         </SummarySection>
       </div>
 
@@ -479,8 +495,8 @@ export function OverviewPage() {
 
       <UnavailablePanel
         title="Feedback inbox"
-        reason="No feedback data source is connected to the dashboard, so an unreviewed-feedback count cannot be shown here."
-        required="A feedback table plus a Rayern endpoint that returns aggregate counts for administrators."
+        reason="Feedback submissions are review-queue content, not an aggregate: counts, states and messages live on the admin-only Feedback page, which reads Rayern's feedback API through the dashboard backend. Repeat-counting them here would add a second, competing copy of the same numbers."
+        required="Nothing — open Feedback for the live queue and per-category counts."
       />
     </div>
   )

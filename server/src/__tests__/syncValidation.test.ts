@@ -76,7 +76,7 @@ describe('Rayern sync contract validation', () => {
     expect(result.success).toBe(true)
   })
 
-  it('rejects a billing block with the wrong currency literal', () => {
+  it('accepts any valid ISO-4217 currency and carries it unchanged', () => {
     const payload = {
       accounts: { totalAccounts: 1, newAccounts30d: 0, verifiedAccounts: 0, unverifiedAccounts: 1, deletedAccounts30d: null, deletionRequestsPending: null, registrationsTrend: [], planBreakdown: [] },
       workspaces: null,
@@ -96,8 +96,37 @@ describe('Rayern sync contract validation', () => {
       telemetry: {},
     }
 
+    // NGN is a valid code: a non-USD snapshot must not be rejected.
+    const result = SyncPayload.safeParse(payload)
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data.billing?.currency).toBe('NGN')
+  })
+
+  it('rejects a malformed currency code with a field-level diagnostic', () => {
+    const payload = {
+      accounts: { totalAccounts: 1, newAccounts30d: 0, verifiedAccounts: 0, unverifiedAccounts: 1, deletedAccounts30d: null, deletionRequestsPending: null, registrationsTrend: [], planBreakdown: [] },
+      workspaces: null,
+      billing: {
+        currency: 'NAIRA',
+        amountUnit: 'minor_units',
+        generatedAt: '2026-10-22T12:00:00.000Z',
+        activePaidSubscribers: 0,
+        freeUsers: 1,
+        totalAccounts: 1,
+        mrr: { amountMinor: 0, amountMajor: 0, byPlan: [] },
+        arr: { amountMinor: 0, amountMajor: 0, definition: 'mrr_x_12' },
+        planBreakdown: [],
+        definitions: {},
+      },
+      services: [],
+      telemetry: {},
+    }
+
     const result = SyncPayload.safeParse(payload)
     expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.issues.some((i) => i.path.join('.') === 'billing.currency')).toBe(true)
+    }
   })
 
   it('rejects billing with a non-integer mrr amountMinor', () => {
@@ -159,8 +188,11 @@ describe('monitoring token guard', () => {
 })
 
 describe('config reads Rayern integration settings', () => {
-  it('defaults billing currency to USD', () => {
-    expect(config.billing.currency).toBe('USD')
+  it('does not assume a billing currency when none is configured', () => {
+    // The previous default was a hard-coded 'USD', which made every non-USD
+    // snapshot fail validation. No expectation now means "accept what Rayern
+    // reports".
+    expect(config.billing.expectedCurrency).toBe('')
   })
 
   it('defaults grace period to 7 days', () => {

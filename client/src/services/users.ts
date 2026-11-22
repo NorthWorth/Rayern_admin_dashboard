@@ -1,6 +1,7 @@
 import { apiRequest, buildQuery, makePaged, USE_DEMO_DATA } from '../lib/api'
-import type { Paged, User, UserFilters, UserStats } from '../lib/types'
+import type { AdminUserFilters, AdminUsersPage, Paged, User, UserFilters, UserStats } from '../lib/types'
 import { buildUserStats, buildUsers } from './demoData'
+import { campaignsService } from './campaigns'
 
 const demoUsers = buildUsers()
 
@@ -31,6 +32,24 @@ function paginate<T>(items: T[], page = 1, pageSize = 25): Paged<T> {
  * the same signatures so the UI never changes when the backend lands.
  */
 export const usersService = {
+  /**
+   * The real account directory, read from Rayern's admin-users API through the
+   * dashboard proxy. `campaignsService` already owns the single implementation
+   * of that contract call, so this delegates instead of duplicating it.
+   *
+   * The local `accounts` table is NOT a user directory: nothing populates it in
+   * production, which is why the previous list was always empty while the KPI
+   * totals were correct.
+   */
+  directory(filters: AdminUserFilters = {}): Promise<AdminUsersPage> {
+    return campaignsService.listUsers(filters)
+  },
+
+  /**
+   * Local-table list — retained only for the Overview "recent registrations"
+   * panel, which still reads the dashboard database. The Users page uses
+   * `directory()` above.
+   */
   list(filters: UserFilters & { page?: number; pageSize?: number }): Promise<Paged<User>> {
     if (USE_DEMO_DATA) {
       const filtered = filterUsers(demoUsers, filters)

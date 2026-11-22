@@ -22,7 +22,14 @@ import { fileURLToPath } from 'node:url'
 import bcrypt from 'bcryptjs'
 import { config, rayernSyncEnabled } from './config'
 import { SERVER_VERSION } from './version'
-import { initDb, pool, isDbReady, setDbReady, startEmbeddedDbIfConfigured } from './db'
+import {
+  initDb,
+  pool,
+  isDbReady,
+  setDbReady,
+  startEmbeddedDbIfConfigured,
+  assertProductionDatabaseConfigured,
+} from './db'
 import { authenticate, requireAdmin, rateLimit } from './auth'
 import { recordAudit } from './audit'
 
@@ -191,6 +198,16 @@ async function bootstrapAdmin(): Promise<void> {
 }
 
 async function start(): Promise<void> {
+  // Fail fast and clearly: a production deployment without DATABASE_URL must
+  // never start on the in-memory development database (it would silently lose
+  // all data on the next restart). No degraded-mode fallback here.
+  try {
+    assertProductionDatabaseConfigured()
+  } catch (err) {
+    console.error(`[dashboard-api] FATAL: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
+
   try {
     await startEmbeddedDbIfConfigured()
     await initDb()

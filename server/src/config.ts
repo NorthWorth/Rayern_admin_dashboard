@@ -127,17 +127,50 @@ export const config = {
      * lightweight authenticated request here instead of pulling the full
      * payload on a short interval. Rayern then generates and pushes its
      * snapshot to the dashboard ingestion endpoint.
+     *
+     * The dashboard-owned periodic wake loop is DISABLED by default now that
+     * the independent scheduler service owns the schedule (see scheduler/).
+     * RAYERN_DASHBOARD_WAKE_SCHEDULER=1 re-enables the legacy in-process loop
+     * as a documented recovery path; it must never run alongside the
+     * scheduler.
      */
     wakeupEndpoint: trimmed('RAYERN_WAKEUP_ENDPOINT') || trimmed('RAYERN_TRIGGER_ENDPOINT'),
-    /** Interval for the wake-up trigger (ms). Default 1h, clamped to 1-2h. */
-    wakeupIntervalMs: envFiniteNumber('RAYERN_WAKEUP_INTERVAL_MS', 3_600_000, 1_800_000, 7_200_000),
+    /** Legacy in-process wake loop (off by default: the scheduler owns it). */
+    wakeupSchedulerEnabled: envBool('RAYERN_DASHBOARD_WAKE_SCHEDULER', false),
+    /** Expected interval between successful snapshots for freshness checks.
+     * Default 2h — the independent scheduler's default cadence. */
+    snapshotIntervalMs: envFiniteNumber('RAYERN_SNAPSHOT_INTERVAL_MS', 7_200_000, 300_000, 86_400_000),
+    /**
+     * A push-only deployment is stale once no successful snapshot has arrived
+     * within this window (default 2.5 × the expected interval, matching the
+     * pull worker's own staleness rule).
+     */
+    snapshotStaleMs: envFiniteNumber('RAYERN_SNAPSHOT_STALE_MS', 18_000_000, 60_000, 604_800_000),
+    /** Interval for the legacy wake-up trigger (ms). Default 2h. */
+    wakeupIntervalMs: envFiniteNumber('RAYERN_WAKEUP_INTERVAL_MS', 7_200_000, 1_800_000, 7_200_000),
+    /**
+     * Read-only scheduler status URL (e.g. https://rayern-scheduler.onrender.com).
+     * The dashboard backend proxies GET <url>/status with SCHEDULER_STATUS_TOKEN
+     * so the browser never talks to the scheduler directly.
+     */
+    schedulerStatusUrl: trimmed('SCHEDULER_STATUS_URL').replace(/\/$/, ''),
+    schedulerStatusToken: process.env.SCHEDULER_STATUS_TOKEN ?? '',
+    schedulerTimeoutMs: envFiniteNumber('SCHEDULER_STATUS_TIMEOUT_MS', 5_000, 500, 60_000),
     /** Per-trigger timeout (ms). Long enough to survive a Render Free cold start. */
     triggerTimeoutMs: Math.max(10_000, Number(process.env.RAYERN_TRIGGER_TIMEOUT_MS ?? '90000')),
     /** Opt-in legacy pull sync (temporary fallback). */
     pullFallbackEnabled: envBool('RAYERN_PULL_FALLBACK_ENABLED', false),
   },
   billing: {
-    currency: (process.env.PAYSTACK_CURRENCY ?? 'USD').toUpperCase(),
+    /**
+     * Currency the dashboard EXPECTS Rayern to report. '' = no expectation, so
+     * any valid ISO-4217 code is accepted (the previous default assumed USD,
+     * which silently discarded every non-USD snapshot). A configured mismatch
+     * is surfaced as a validation diagnostic, never a silent drop.
+     */
+    expectedCurrency: (process.env.RAYERN_BILLING_CURRENCY ?? process.env.PAYSTACK_CURRENCY ?? '')
+      .trim()
+      .toUpperCase(),
     gracePeriodDays: Math.max(0, Number(process.env.BILLING_GRACE_PERIOD_DAYS ?? '7')),
   },
   adminEmails: (process.env.ADMIN_EMAILS ?? '')

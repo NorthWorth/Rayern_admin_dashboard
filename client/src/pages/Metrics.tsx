@@ -6,7 +6,7 @@ import { TrendLineChart } from '../components/charts'
 import { platformMetricsService } from '../services/platformMetrics'
 import { useQuery } from '../hooks/useQuery'
 import { usePageRefresh } from '../hooks/usePageRefresh'
-import { formatNumber, titleCase } from '../lib/utils'
+import { formatCount, formatNumber, titleCase } from '../lib/utils'
 
 export function MetricsPage() {
   const q = useQuery(() => platformMetricsService.overview())
@@ -17,8 +17,24 @@ export function MetricsPage() {
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <KpiCard label="Registered accounts" value={q.data ? formatNumber(q.data.registeredAccounts) : '—'} />
         <KpiCard label="New accounts (30d)" value={q.data ? formatNumber(q.data.newAccounts30d) : '—'} tone="green" />
-        <KpiCard label="Total workspaces" value={q.data ? formatNumber(q.data.totalWorkspaces) : '—'} />
-        <KpiCard label="Deletions (30d)" value={q.data ? formatNumber(q.data.deletedAccounts30d) : '—'} tone="amber" sub={q.data && q.data.deletionRequestsPending > 0 ? `${q.data.deletionRequestsPending} requests pending` : undefined} />
+        <KpiCard
+          label="Total workspaces"
+          value={q.data ? formatCount(q.data.totalWorkspaces) : '—'}
+          sub={q.data && q.data.totalWorkspaces === null ? 'not reported in this snapshot' : undefined}
+        />
+        {/* Missing/never-measured is "—", never a measured 0. */}
+        <KpiCard
+          label="Deletions (30d)"
+          value={q.data ? formatCount(q.data.deletedAccounts30d) : '—'}
+          tone="amber"
+          sub={
+            q.data && q.data.deletedAccounts30d === null
+              ? 'Rayern does not track deletion accounting'
+              : q.data && q.data.deletionRequestsPending !== null && q.data.deletionRequestsPending > 0
+                ? `${q.data.deletionRequestsPending} requests pending`
+                : undefined
+          }
+        />
       </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
